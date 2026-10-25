@@ -13,7 +13,7 @@ Wheatley is an autonomous administration agent purpose-built for homelab operato
 - 🔒 **Least Privilege & Native Security:** Runs inside a dedicated, unprivileged Debian LXC container. Connects to Proxmox VE nodes using native `@pve` API tokens with `PVEAuditor` permissions.
 - 🌐 **Shareable & Config-Driven:** Zero hardcoded IPs, hostnames, or credentials. Everything lives in `/etc/wheatley/config.yaml` and is backed by environment variable interpolation (`${VAR}`) from `/etc/wheatley/secrets.env`.
 - 📊 **Multi-Node Cluster & Standalone Support:** Monitors single standalone nodes or distributed multi-node topologies.
-- 💰 **LLM Budget Guardrails:** Engineered to run on the $10/month Google Developer Program credit (using `gemini-2.5-flash` for triage and `gemini-2.5-pro` for deep investigation) with an automated credit ledger and spending thresholds.
+- 💰 **LLM Budget Guardrails:** Engineered to run on the $10/month Google Developer Program credit (using `gemini-3.8-flash` for triage and `gemini-2.5-pro` for deep investigation) with an automated credit ledger and spending thresholds.
 
 ---
 
@@ -113,6 +113,12 @@ systemctl enable --now wheatley
 Available both inside the LXC container and from the Proxmox host via the convenience wrapper:
 
 ```bash
+# Auto-discover homelab services & guests across all Proxmox nodes
+wheatley discover
+
+# Export recommended draft configuration
+wheatley discover --output /etc/wheatley/config.draft.yaml
+
 # Validate configuration and secrets
 wheatley config validate
 
@@ -130,6 +136,7 @@ wheatley --help
 From your authorized Telegram chat:
 - `/start` — Verifies authentication and registers your session.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
+- `/discover` — Probes nodes & guests to auto-detect active services and container environments.
 
 ---
 
@@ -141,18 +148,18 @@ From your authorized Telegram chat:
   - SQLite audit logger (`audit_log`, `proposals`, `budget_usage`, `credit_ledger`).
   - Telegram bot adapter with user whitelisting and single-instance atomic file lock.
   - Systemd service daemon.
-- [x] **Phase 2: Multi-Node Access & Telemetry**
+- [x] **Phase 2: Multi-Node Access & Auto-Discovery**
   - Host security provisioning script (`install/host-setup.sh`).
   - PVE REST API client wrapper with TLS certificate pinning.
   - Live multi-node status aggregation (`/status`).
-- [ ] **Phase 2 (Continued): Auto-Discovery**
-  - Service fingerprint database (`services.yaml`).
-  - Automated guest scanning (`wheatley discover` and `/discover`).
+  - Service fingerprint database (`wheatley/discovery/services.yaml`).
+  - Automated guest & service scanning (`wheatley discover` and `/discover`).
+  - Draft configuration generator (`--output config.draft.yaml`).
 - [ ] **Phase 3: Check Engine & Webhooks**
   - Built-in checks (`node_metrics`, `storage`, `guest_state`, `http`, `docker`).
   - Proxmox `vzdump` backup notification webhook receiver.
 - [ ] **Phase 4: Gemini LLM Integration**
-  - Function-calling loop with `gemini-2.5-flash` / `gemini-2.5-pro`.
+  - Function-calling loop with `gemini-3.8-flash` / `gemini-2.5-pro`.
   - Token budget guardrails and $10/mo credit ledger.
 - [ ] **Phase 5: Secure Remote Terminal Diagnostics**
   - SSH wrapper with strict command allowlist.

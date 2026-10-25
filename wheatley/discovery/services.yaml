@@ -1,0 +1,117 @@
+# ==============================================================================
+# Wheatley Service Discovery Fingerprints
+# ==============================================================================
+# Maps standard homelab services to their default ports and HTTP/TCP probes.
+# Contributors can add service definitions here without writing Python code.
+# ==============================================================================
+
+services:
+  - id: plex
+    name: "Plex Media Server"
+    category: "media"
+    port: 32400
+    protocol: "http"
+    path: "/identity"
+    expected_status: [200]
+    match_body: "MediaContainer"
+
+  - id: frigate
+    name: "Frigate NVR"
+    category: "security"
+    port: 5000
+    protocol: "http"
+    path: "/api/version"
+    expected_status: [200]
+
+  - id: crafty
+    name: "Crafty Controller (Minecraft Manager)"
+    category: "gaming"
+    port: 8443
+    protocol: "https"
+    tls_verify: false
+    path: "/"
+    expected_status: [200, 302, 401]
+
+  - id: omv
+    name: "OpenMediaVault"
+    category: "storage"
+    port: 80
+    protocol: "http"
+    path: "/"
+    expected_status: [200]
+    match_body: "openmediavault"
+
+  - id: home-assistant
+    name: "Home Assistant"
+    category: "automation"
+    port: 8123
+    protocol: "http"
+    path: "/manifest.json"
+    expected_status: [200]
+    match_body: "homeassistant"
+
+  - id: jellyfin
+    name: "Jellyfin Media Server"
+    category: "media"
+    port: 8096
+    protocol: "http"
+    path: "/System/Info/Public"
+    expected_status: [200]
+
+  - id: pi-hole
+    name: "Pi-hole DNS Sinkhole"
+    category: "networking"
+    port: 80
+    protocol: "http"
+    path: "/admin/"
+    expected_status: [200, 302]
+    match_body: "Pi-hole"
+
+  - id: adguard-home
+    name: "AdGuard Home"
+    category: "networking"
+    port: 3000
+    protocol: "http"
+    path: "/login.html"
+    expected_status: [200]
+
+  - id: portainer
+    name: "Portainer CE"
+    category: "infra"
+    port: 9000
+    protocol: "http"
+    path: "/api/system/status"
+    expected_status: [200, 401]
+
+  - id: vaultwarden
+    name: "Vaultwarden Password Manager"
+    category: "security"
+    port: 80
+    protocol: "http"
+    path: "/alive"
+    expected_status: [200]
+
+  - id: uptime-kuma
+    name: "Uptime Kuma"
+    category: "monitoring"
+    port: 3001
+    protocol: "http"
+    path: "/"
+    expected_status: [200]
+
+  - id: node-exporter
+    name: "Prometheus Node Exporter"
+    category: "monitoring"
+    port: 9100
+    protocol: "http"
+    path: "/metrics"
+    expected_status: [200]
+
+  - id: pbs
+    name: "Proxmox Backup Server"
+    category: "backup"
+    port: 8007
+    protocol: "https"
+    tls_verify: false
+    path: "/"
+    expected_status: [200]

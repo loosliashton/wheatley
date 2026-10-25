@@ -31,10 +31,12 @@ class TelegramBot(ChatInterface):
         config: TelegramConfig,
         audit: AuditLogger,
         status_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
+        discovery_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
     ):
         self.config = config
         self.audit = audit
         self.status_provider = status_provider
+        self.discovery_provider = discovery_provider
         self.allowed_users: Set[int] = set(config.allowed_user_ids)
         self.primary_chat_id: Optional[int] = config.allowed_user_ids[0] if config.allowed_user_ids else None
         self.app: Application = ApplicationBuilder().token(config.bot_token).build()
@@ -62,6 +64,7 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
+        self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
@@ -73,9 +76,10 @@ class TelegramBot(ChatInterface):
         msg = (
             f"👋 *Greetings, {user_name}!*\n\n"
             f"I'm *Wheatley*, your homelab monitoring & AI administration agent.\n\n"
-            f"• Use /status to check node and service health\n"
-            f"• Use /audit to inspect recent action logs\n"
-            f"• Use /help to see all available commands\n\n"
+            f"• `/status` - Check node and service health\n"
+            f"• `/discover` - Auto-detect services & containers\n"
+            f"• `/audit` - Inspect recent action logs\n"
+            f"• `/help` - See all available commands\n\n"
             f"All state changes require your explicit button approval."
         )
         self.audit.log_event("CMD", f"tg:{update.effective_user.id}", "/start", "SUCCESS")
@@ -87,6 +91,7 @@ class TelegramBot(ChatInterface):
         help_text = (
             "🛠 *Wheatley Commands*\n\n"
             "/status - Cluster & guest health overview\n"
+            "/discover - Probe nodes & guests to discover active services\n"
             "/audit - Recent security and activity audit log\n"
             "/usage - GCP credit and token consumption\n"
             "/mute <check_id> <mins> - Temporarily silence alerts\n"
@@ -102,6 +107,24 @@ class TelegramBot(ChatInterface):
         else:
             status_text = "🟢 *Wheatley Core:* Online\nNode checks initializing..."
         await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_discover(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        self.audit.log_event("CMD", f"tg:{update.effective_user.id}", "/discover", "SUCCESS")
+        await update.message.reply_text(
+            "🔍 *Scanning Proxmox nodes and probing guests for services...*\n_This may take a few seconds._",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        if self.discovery_provider:
+            try:
+                summary = await self.discovery_provider()
+                await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                logger.exception("Telegram /discover failed")
+                await update.message.reply_text(f"❌ *Discovery failed:* `{e}`", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("⚠️ Auto-discovery provider not connected to bot.")
 
     async def _cmd_audit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):

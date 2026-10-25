@@ -111,6 +111,7 @@ class WheatleyApp:
                 config=self.config.chat.telegram,
                 audit=self.audit,
                 status_provider=self.get_status_overview,
+                discovery_provider=self.run_discovery_summary,
             )
             await self.bot.start()
             logger.info("Telegram interface active.")
@@ -133,6 +134,13 @@ class WheatleyApp:
         self.audit.log_event("SYSTEM", "daemon", "shutdown", "SUCCESS")
         logger.info("Wheatley stopped cleanly.")
 
+    async def run_discovery_summary(self) -> str:
+        """Run inventory discovery and return formatted markdown."""
+        from wheatley.discovery.discover import InventoryDiscovery
+        discovery = InventoryDiscovery(self.config)
+        guests = await discovery.scan_all()
+        return discovery.format_summary_markdown(guests)
+
 
 def cmd_validate(args: argparse.Namespace) -> None:
     try:
@@ -148,6 +156,38 @@ def cmd_validate(args: argparse.Namespace) -> None:
         sys.exit(0)
     except Exception as e:
         print(f"❌ Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_discover(args: argparse.Namespace) -> None:
+    from wheatley.discovery.discover import InventoryDiscovery
+    import json
+    import yaml
+
+    try:
+        cfg = load_config(args.config, args.secrets)
+        print("🔍 Scanning Proxmox nodes and probing guests for active services...")
+        discovery = InventoryDiscovery(cfg)
+        guests = asyncio.run(discovery.scan_all())
+
+        if getattr(args, "json", False):
+            out = [g.model_dump() for g in guests]
+            print(json.dumps(out, indent=2))
+            return
+
+        if getattr(args, "output", None):
+            draft = discovery.generate_draft_config(guests)
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(draft, f, sort_keys=False, default_flow_style=False)
+            print(f"✅ Recommended draft configuration written to: {out_path}\n")
+
+        print(discovery.format_summary_markdown(guests))
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ Discovery error: {e}", file=sys.stderr)
+        logger.exception("Discovery failed: %s", e)
         sys.exit(1)
 
 
@@ -175,6 +215,13 @@ def main() -> None:
     p_run.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
     p_run.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
 
+    # Discover
+    p_disc = subparsers.add_parser("discover", help="Scan Proxmox nodes and auto-discover guests/services")
+    p_disc.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
+    p_disc.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
+    p_disc.add_argument("--output", "-o", help="Path to write recommended draft config.yaml")
+    p_disc.add_argument("--json", action="store_true", help="Output discovered inventory as JSON")
+
     # Config validate
     p_val = subparsers.add_parser("config", help="Configuration utilities")
     p_val_sub = p_val.add_subparsers(dest="config_command")
@@ -200,6 +247,9 @@ def main() -> None:
         except Exception as e:
             logger.exception("Fatal startup error: %s", e)
             sys.exit(1)
+
+    elif args.command == "discover":
+        cmd_discover(args)
 
     elif args.command == "config" and getattr(args, "config_command", None) == "validate":
         cmd_validate(args)

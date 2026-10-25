@@ -83,6 +83,18 @@ class ProxmoxClient:
         api = self._get_api()
         return api.nodes(self.name).storage.get()
 
+    def get_guest_config(self, vmid: int, guest_type: str) -> Dict[str, Any]:
+        """Fetch guest configuration (onboot, cores, memory, net0, etc.)."""
+        api = self._get_api()
+        try:
+            if guest_type == "qemu":
+                return api.nodes(self.name).qemu(vmid).config.get()
+            elif guest_type == "lxc":
+                return api.nodes(self.name).lxc(vmid).config.get()
+        except Exception as e:
+            logger.warning("Error fetching config for %s/%s on %s: %s", guest_type, vmid, self.name, e)
+        return {}
+
     def get_guest_network_interfaces(self, vmid: int, guest_type: str) -> List[Dict[str, Any]]:
         """Fetch network interfaces / IP addresses for a guest."""
         api = self._get_api()
@@ -99,3 +111,38 @@ class ProxmoxClient:
             except Exception:
                 return []
         return []
+
+    def get_guest_ips(self, vmid: int, guest_type: str) -> List[str]:
+        """Resolve clean LAN IPv4 addresses for a guest."""
+        import re
+        ips: List[str] = []
+        ifaces = self.get_guest_network_interfaces(vmid, guest_type)
+        for iface in ifaces:
+            for ip_info in iface.get("ip-addresses", []):
+                addr = ip_info.get("ip-address") or ip_info.get("ip")
+                if addr and ":" not in addr:
+                    if not addr.startswith(("127.", "169.254.", "0.")):
+                        ips.append(addr)
+            inet = iface.get("inet", "")
+            if inet and "/" in inet:
+                addr = inet.split("/")[0]
+                if addr and not addr.startswith(("127.", "169.254.", "0.")):
+                    ips.append(addr)
+
+        if not ips:
+            cfg = self.get_guest_config(vmid, guest_type)
+            for k, v in cfg.items():
+                if k.startswith("net") and isinstance(v, str):
+                    match = re.search(r"ip=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", v)
+                    if match:
+                        addr = match.group(1)
+                        if not addr.startswith(("127.", "169.254.", "0.")):
+                            ips.append(addr)
+
+        seen = set()
+        res = []
+        for ip in ips:
+            if ip not in seen:
+                seen.add(ip)
+                res.append(ip)
+        return res

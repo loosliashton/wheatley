@@ -49,7 +49,7 @@ class BudgetConfig(BaseModel):
     flash_only_threshold_usd: float = 8.0
     pause_threshold_usd: float = 9.50
     daily_cap_usd: float = 2.0
-    model_flash: str = "gemini-2.5-flash"
+    model_flash: str = "gemini-3.8-flash"
     model_pro: str = "gemini-2.5-pro"
 
 

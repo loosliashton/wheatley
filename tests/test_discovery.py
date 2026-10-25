@@ -78,7 +78,7 @@ def test_generate_draft_config(dummy_config):
             type="lxc",
             status="running",
             onboot=True,
-            ips=["192.168.1.110"],
+            ips=["10.0.0.110"],
             is_self=True,
         ),
     ]

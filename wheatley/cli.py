@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 
 from wheatley.audit import AuditLogger
+from wheatley.budget import BudgetTracker
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
+from wheatley.gemini import GeminiAgent
 from wheatley.webhook import WebhookServer
 
 logging.basicConfig(
@@ -28,8 +30,10 @@ class WheatleyApp:
         self.secrets_path = secrets_path
         self.config: WheatleyConfig = load_config(config_path, secrets_path)
         self.audit = AuditLogger()
+        self.budget = BudgetTracker(self.config.budget, self.audit)
         self.bot: TelegramBot | None = None
         self.check_engine: CheckEngine | None = None
+        self.gemini_agent: GeminiAgent | None = None
         self.webhook_server: WebhookServer | None = None
         self._stop_event = asyncio.Event()
 
@@ -127,13 +131,24 @@ class WheatleyApp:
             audit=self.audit,
             alert_sink=alert_sink,
         )
-        if self.bot:
-            self.bot.check_engine = self.check_engine
-
         self.check_engine.start()
         logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
 
-        # 3. Initialize and start Webhook receiver
+        # 3. Initialize Gemini AI Agent
+        self.gemini_agent = GeminiAgent(
+            config=self.config,
+            audit=self.audit,
+            budget=self.budget,
+            check_engine=self.check_engine,
+            proxmox_clients=self.check_engine.clients,
+        )
+
+        if self.bot:
+            self.bot.check_engine = self.check_engine
+            self.bot.gemini_agent = self.gemini_agent
+            self.bot.budget = self.budget
+
+        # 4. Initialize and start Webhook receiver
         if self.config.webhook and self.config.webhook.enabled:
             self.webhook_server = WebhookServer(
                 config=self.config.webhook,
@@ -142,7 +157,7 @@ class WheatleyApp:
             )
             await self.webhook_server.start()
 
-        # 4. Start Telegram bot
+        # 5. Start Telegram bot
         if self.bot:
             await self.bot.start()
             logger.info("Telegram interface active.")
@@ -307,6 +322,53 @@ def cmd_check(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_budget(args: argparse.Namespace) -> None:
+    try:
+        cfg = load_config(args.config, args.secrets)
+        audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
+        budget = BudgetTracker(cfg.budget, audit)
+
+        subcmd = getattr(args, "budget_subcommand", "usage") or "usage"
+        if subcmd == "usage":
+            print(budget.format_usage_markdown())
+        elif subcmd == "set-bank":
+            amount = float(args.amount)
+            budget.set_starting_bank(amount)
+            print(f"✅ Starting carried-over credit bank set to: ${amount:.2f}")
+    except Exception as e:
+        print(f"❌ Budget command error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_ask(args: argparse.Namespace) -> None:
+    try:
+        cfg = load_config(args.config, args.secrets)
+        audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
+        budget = BudgetTracker(cfg.budget, audit)
+        check_engine = CheckEngine(cfg, audit)
+
+        agent = GeminiAgent(
+            config=cfg,
+            audit=audit,
+            budget=budget,
+            check_engine=check_engine,
+            proxmox_clients=check_engine.clients,
+        )
+
+        if not agent.is_configured:
+            print("❌ Gemini AI is not configured. Add GEMINI_API_KEY to secrets.env.", file=sys.stderr)
+            sys.exit(1)
+
+        question = " ".join(args.question)
+        print(f"🤖 Wheatley thinking with {agent.model_name}...\n")
+        response = asyncio.run(agent.chat(question))
+        print(response)
+    except Exception as e:
+        print(f"❌ Ask error: {e}", file=sys.stderr)
+        logger.exception("Ask failed: %s", e)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Wheatley - Homelab Monitoring & AI Agent")
     subparsers = parser.add_subparsers(dest="command")
@@ -315,6 +377,13 @@ def main() -> None:
     p_run = subparsers.add_parser("run", help="Run the Wheatley monitoring agent daemon")
     p_run.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
     p_run.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
+
+    # Ask
+    p_ask = subparsers.add_parser("ask", help="Ask Wheatley AI a homelab question directly")
+    p_ask.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
+    p_ask.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
+    p_ask.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
+    p_ask.add_argument("question", nargs="+", help="Question to ask Wheatley")
 
     # Check
     p_chk = subparsers.add_parser("check", help="Check engine utilities")
@@ -326,6 +395,16 @@ def main() -> None:
     p_chk_run = p_chk_sub.add_parser("run", help="Run a specific check immediately")
     p_chk_run.add_argument("check_id", help="ID of the check to run")
     p_chk_sub.add_parser("run-all", help="Run all configured checks immediately")
+
+    # Budget
+    p_bud = subparsers.add_parser("budget", help="GCP credit & Gemini budget tracker")
+    p_bud.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
+    p_bud.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
+    p_bud.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
+    p_bud_sub = p_bud.add_subparsers(dest="budget_subcommand")
+    p_bud_sub.add_parser("usage", help="Show month-to-date and daily spend")
+    p_bud_bank = p_bud_sub.add_parser("set-bank", help="Set carried-over credit bank balance")
+    p_bud_bank.add_argument("amount", type=float, help="Amount in USD (e.g. 15.00)")
 
     # Discover
     p_disc = subparsers.add_parser("discover", help="Scan Proxmox nodes and auto-discover guests/services")
@@ -359,6 +438,12 @@ def main() -> None:
         except Exception as e:
             logger.exception("Fatal startup error: %s", e)
             sys.exit(1)
+
+    elif args.command == "ask":
+        cmd_ask(args)
+
+    elif args.command == "budget":
+        cmd_budget(args)
 
     elif args.command == "check":
         cmd_check(args)

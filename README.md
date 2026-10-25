@@ -127,6 +127,13 @@ wheatley check list
 wheatley check run node-health
 wheatley check run-all
 
+# Ask Wheatley AI a homelab administration question directly
+wheatley ask "How is the cluster doing?"
+
+# Budget & GCP Credit management
+wheatley budget usage
+wheatley budget set-bank 15.00
+
 # Inspect the SQLite audit log
 wheatley audit
 
@@ -139,8 +146,12 @@ wheatley --help
 
 ### Telegram Bot Commands
 From your authorized Telegram chat:
+- **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is Frigate slow?"* or *"What guests are running on cave?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
 - `/checks` — Displays real-time status of all monitored checks and active mute windows.
+- `/usage` — Displays current month & daily Gemini token consumption against the $10/mo GCP credit.
+- `/budget` — Displays budget safety caps or sets carried-over credit bank (`/budget set-bank <usd>`).
+- `/investigate <id>` — Triggers automated root-cause diagnosis on any service check.
 - `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute plex 120`).
 - `/unmute <check_id>` — Re-enables alerts for a silenced check.
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
@@ -173,9 +184,13 @@ From your authorized Telegram chat:
   - Telegram commands: `/checks`, `/mute`, `/unmute`.
   - CLI check utilities: `wheatley check list`, `wheatley check run <id>`, `wheatley check run-all`.
   - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088).
-- [ ] **Phase 4: Gemini LLM Integration**
-  - Function-calling loop with `gemini-3.8-flash` / `gemini-2.5-pro`.
-  - Token budget guardrails and $10/mo credit ledger.
+- [x] **Phase 4: Gemini LLM Integration & Budget Guardrails**
+  - Multi-turn function-calling reasoning loop using `gemini-3.8-flash`.
+  - Dynamic system instruction generated at runtime from cluster inventory without hardcoding IPs.
+  - Tool registry enabling Gemini to query cluster telemetry, guest details, check states, and audit logs.
+  - Token budget guardrails with $10/mo credit ledger, daily cap ($2.00/day), and auto-pause threshold ($9.50).
+  - Conversational AI chat in Telegram and CLI (`wheatley ask`).
+  - Inline `[🔍 Investigate]` alert button and `/investigate` command for automated root-cause analysis.
 - [ ] **Phase 5: Secure Remote Terminal Diagnostics**
   - SSH wrapper with strict command allowlist.
 - [ ] **Phase 6: Interactive Approval Gate for Mutations**

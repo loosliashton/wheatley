@@ -50,7 +50,10 @@ class BudgetConfig(BaseModel):
     pause_threshold_usd: float = 9.50
     daily_cap_usd: float = 2.0
     model_flash: str = "gemini-3.8-flash"
-    model_pro: str = "gemini-2.5-pro"
+    model_pro: str = "gemini-3.8-flash"
+    input_cost_per_million: float = 0.15
+    output_cost_per_million: float = 0.60
+    max_tool_iterations: int = 10
 
 
 class TelegramConfig(BaseModel):

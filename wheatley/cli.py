@@ -14,6 +14,7 @@ from wheatley.budget import BudgetTracker
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
+from wheatley.health import HealthMonitor
 from wheatley.llm import LLMAgent, UsageTracker
 from wheatley.webhook import WebhookServer
 
@@ -21,6 +22,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# httpx logs full request URLs at INFO. Those URLs contain secrets (the Telegram bot
+# token in /bot<TOKEN>/..., heartbeat push tokens), so keep these loggers at WARNING.
+for _noisy in ("httpx", "httpcore", "telegram.ext.Updater"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# Watchdogs poll /health every minute or so; keep those out of the access log.
+logging.getLogger("aiohttp.access").addFilter(lambda r: '"GET /health ' not in r.getMessage())
 logger = logging.getLogger("wheatley")
 
 
@@ -37,6 +44,7 @@ class WheatleyApp:
         self.llm_agent: LLMAgent | None = None
         self.gemini_agent: LLMAgent | None = None
         self.webhook_server: WebhookServer | None = None
+        self.health = HealthMonitor(self.config.health)
         self._stop_event = asyncio.Event()
 
     async def get_status_overview(self) -> str:
@@ -153,21 +161,42 @@ class WheatleyApp:
             self.bot.gemini_agent = self.llm_agent
             self.bot.budget = self.usage
 
-        # 4. Initialize and start Webhook receiver
-        if self.config.webhook and self.config.webhook.enabled:
+        # 4. Health probes (for external watchdogs)
+        engine = self.check_engine
+        self.health.register(
+            "check_engine",
+            lambda: engine.health(self.config.health.stale_after_seconds),
+        )
+        if self.bot:
+            bot = self.bot
+            self.health.register(
+                "telegram",
+                lambda: {"ok": bool(bot.app.updater and bot.app.updater.running)},
+            )
+
+        # 5. HTTP listener: PVE webhooks and/or the /health endpoint
+        webhooks_on = bool(self.config.webhook and self.config.webhook.enabled)
+        health_on = self.config.health.enabled
+        if webhooks_on or health_on:
             self.webhook_server = WebhookServer(
                 config=self.config.webhook,
                 audit=self.audit,
                 alert_sink=alert_sink,
+                health_monitor=self.health,
+                serve_webhooks=webhooks_on,
+                serve_health=health_on,
             )
             await self.webhook_server.start()
 
-        # 5. Start Telegram bot
+        # 6. Start Telegram bot
         if self.bot:
             await self.bot.start()
             logger.info("Telegram interface active.")
         else:
             logger.warning("No chat backend configured in chat section!")
+
+        # 7. Optional push heartbeat (starts after the bot so the first ping reflects a healthy state)
+        self.health.start()
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -180,6 +209,7 @@ class WheatleyApp:
         await self._stop_event.wait()
 
         logger.info("Shutting down Wheatley...")
+        await self.health.stop()
         if self.webhook_server:
             await self.webhook_server.stop()
         if self.check_engine:

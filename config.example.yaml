@@ -65,6 +65,24 @@ webhook:
   port: 8088
   secret_token: "${WEBHOOK_SECRET_TOKEN:-}"
 
+# Self-monitoring for an external watchdog of your choice (Uptime Kuma, healthchecks.io,
+# Gatus, Uptime Robot, ...). Wheatley can't report its own outage, so something
+# outside it needs to notice when it goes quiet. Use either mode, or both:
+#
+#   Pull: point an HTTP monitor at  http://<wheatley-ip>:<webhook.port>/health
+#         200 = healthy, 503 = degraded (scheduler stalled or Telegram polling stopped).
+#         No auth required; the response contains no hostnames, IPs or check names.
+#
+#   Push: set push_url to your watchdog's heartbeat URL (e.g. an Uptime Kuma "Push"
+#         monitor or a healthchecks.io check). Wheatley requests it every
+#         push_interval_seconds while healthy, and stops when degraded or down.
+health:
+  enabled: true                      # serve GET /health (on the webhook host/port)
+  # stale_after_seconds: 300         # default: 3x shortest check interval, min 180s
+  push_url: "${HEALTH_PUSH_URL:-}"   # keep in secrets.env; it usually contains a token
+  push_interval_seconds: 60
+  push_method: GET                   # GET, or POST (sends the health report as JSON)
+
 # Monitored Checks
 checks:
   # Cluster & Node Health

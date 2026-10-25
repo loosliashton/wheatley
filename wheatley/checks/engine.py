@@ -55,6 +55,8 @@ class CheckEngine:
         self.scheduler = AsyncIOScheduler()
         self.states: Dict[str, CheckState] = {}
         self.checks: Dict[str, BaseCheck] = {}
+        self.last_run_at: Optional[datetime] = None
+        self.started_at: Optional[datetime] = None
 
         # Initialize Proxmox clients and context
         self.clients: Dict[str, ProxmoxClient] = {}
@@ -144,6 +146,7 @@ class CheckEngine:
         curr_status = result.status
         state.last_result = result
         state.last_status = curr_status
+        self.last_run_at = datetime.now(timezone.utc)
 
         # Update streak counts
         if curr_status == CheckStatus.OK:
@@ -211,6 +214,31 @@ class CheckEngine:
                 replace_existing=True,
             )
         self.scheduler.start()
+        self.started_at = datetime.now(timezone.utc)
+
+    def health(self, stale_after_seconds: Optional[int] = None) -> Dict[str, Any]:
+        """Report whether the scheduler is alive and checks are still executing.
+
+        A check run is considered overdue if nothing has executed for
+        ``stale_after_seconds`` (default: 3x the shortest check interval, min 180s).
+        """
+        running = bool(self.scheduler.running)
+        if not self.checks:
+            return {"ok": running, "scheduler_running": running, "checks": 0}
+
+        min_interval = min(max(c.config.interval_seconds, 10) for c in self.checks.values())
+        threshold = stale_after_seconds or max(3 * min_interval, 180)
+        now = datetime.now(timezone.utc)
+        reference = self.last_run_at or self.started_at
+        age = (now - reference).total_seconds() if reference else None
+        fresh = age is not None and age <= threshold
+        return {
+            "ok": running and fresh,
+            "scheduler_running": running,
+            "checks": len(self.checks),
+            "seconds_since_last_run": round(age, 1) if age is not None else None,
+            "stale_after_seconds": threshold,
+        }
 
     def stop(self) -> None:
         """Stop the check engine scheduler."""

@@ -22,19 +22,27 @@ class WebhookServer:
         config: WebhookConfig,
         audit: AuditLogger,
         alert_sink: Optional[Callable[[str, Optional[Dict[str, Any]]], Coroutine[Any, Any, None]]] = None,
+        health_monitor: Optional[Any] = None,
+        serve_webhooks: bool = True,
+        serve_health: bool = True,
     ):
         self.config = config
         self.audit = audit
         self.alert_sink = alert_sink
+        self.health_monitor = health_monitor
+        self.serve_webhooks = serve_webhooks
+        self.serve_health = serve_health
         self.app = web.Application()
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        self.app.router.add_get("/health", self._handle_health)
-        self.app.router.add_post("/webhook/pve", self._handle_pve)
-        self.app.router.add_post("/webhook/generic", self._handle_generic)
+        if self.serve_health:
+            self.app.router.add_get("/health", self._handle_health)
+        if self.serve_webhooks:
+            self.app.router.add_post("/webhook/pve", self._handle_pve)
+            self.app.router.add_post("/webhook/generic", self._handle_generic)
 
     def _is_authorized(self, request: web.Request) -> bool:
         if not self.config.secret_token:
@@ -58,7 +66,12 @@ class WebhookServer:
         return False
 
     async def _handle_health(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "app": "wheatley"})
+        """Unauthenticated health probe for external watchdogs. 200 = healthy, 503 = degraded."""
+        if self.health_monitor is None:
+            return web.json_response({"status": "ok", "app": "wheatley"})
+        report = self.health_monitor.snapshot()
+        status_code = 200 if report["status"] == "ok" else 503
+        return web.json_response(report, status=status_code)
 
     async def _handle_pve(self, request: web.Request) -> web.Response:
         """Handle incoming webhook notification from Proxmox VE (PVE 8.1+ notification target)."""

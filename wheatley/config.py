@@ -117,6 +117,23 @@ class WebhookConfig(BaseModel):
     secret_token: Optional[str] = None
 
 
+class HealthConfig(BaseModel):
+    """Self-monitoring for external watchdogs (Uptime Kuma, healthchecks.io, Gatus, etc.).
+
+    Two modes, usable together:
+      * Pull: GET /health on the HTTP listener (webhook host/port). 200 = healthy, 503 = degraded.
+      * Push: if push_url is set, Wheatley requests it every push_interval_seconds while healthy.
+    """
+    enabled: bool = Field(True, description="Serve GET /health on the HTTP listener")
+    stale_after_seconds: Optional[int] = Field(
+        None, description="Report degraded if no check has run for this long (default: 3x shortest interval, min 180s)"
+    )
+    push_url: Optional[str] = Field(None, description="Heartbeat URL to request while healthy (treated as a secret)")
+    push_interval_seconds: int = Field(60, ge=10)
+    push_method: str = Field("GET", description="GET or POST")
+    push_timeout_seconds: float = Field(10.0, gt=0)
+
+
 class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
     self_guest: Optional[str] = Field(None, description="e.g. cave/110 to protect agent self")
@@ -125,6 +142,7 @@ class WheatleyConfig(BaseModel):
     chat: ChatConfig
     checks: List[CheckConfig] = Field(default_factory=list)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    health: HealthConfig = Field(default_factory=HealthConfig)
     allowlist: List[str] = Field(
         default_factory=lambda: [
             "uptime",

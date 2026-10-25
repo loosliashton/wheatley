@@ -86,6 +86,8 @@ class InventoryDiscovery:
         except Exception:
             return False
 
+    COMMON_WEB_PORTS = [80, 443, 3000, 3001, 5000, 8000, 8080, 8443, 8888, 9000, 9443, 11434]
+
     async def probe_http_service(
         self, ip: str, service: Dict[str, Any], guest_spec: str = "guest", timeout: float = 2.0
     ) -> Optional[DiscoveredService]:
@@ -103,11 +105,13 @@ class InventoryDiscovery:
 
         url = f"{proto}://{ip}:{port}{path}"
         try:
-            async with httpx.AsyncClient(verify=tls_verify, timeout=timeout) as client:
+            async with httpx.AsyncClient(verify=tls_verify, timeout=timeout, follow_redirects=True) as client:
                 res = await client.get(url)
                 if expected_status and res.status_code not in expected_status:
                     return None
                 if match_body and match_body not in res.text:
+                    return None
+                if path != "/" and ("404" in str(res.url) or "404" in res.text[:300].lower()):
                     return None
 
                 port_str = f":{port}" if not ((proto == "http" and port == 80) or (proto == "https" and port == 443)) else ""
@@ -126,6 +130,77 @@ class InventoryDiscovery:
                 )
         except Exception:
             return None
+
+    async def probe_unknown_web_service(
+        self, ip: str, port: int, guest_spec: str = "guest", timeout: float = 2.0
+    ) -> Optional[DiscoveredService]:
+        """Probe an unclaimed port for an unknown HTTP/HTTPS web service and extract HTML title."""
+        import html
+        import re
+
+        if not await self.probe_tcp_port(ip, port, timeout=1.0):
+            return None
+
+        protocols = ["http"]
+        if port in (443, 8443, 9443):
+            protocols = ["https", "http"]
+        else:
+            protocols = ["http", "https"]
+
+        for proto in protocols:
+            url = f"{proto}://{ip}:{port}/"
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=timeout, follow_redirects=True) as client:
+                    res = await client.get(url)
+
+                    if res.status_code >= 500:
+                        continue
+
+                    title = None
+                    if res.text:
+                        match = re.search(r"<title[^>]*>(.*?)</title>", res.text, re.IGNORECASE | re.DOTALL)
+                        if match:
+                            raw_title = match.group(1).strip()
+                            clean_title = html.unescape(re.sub(r"\s+", " ", raw_title)).strip()
+                            if clean_title and clean_title.lower() not in (
+                                "404 not found", "403 forbidden", "error", "document moved", "302 found", "index of /", "loading...", "loading"
+                            ):
+                                title = clean_title
+
+                    # Text signatures for APIs & single-page apps
+                    if not title and res.text:
+                        if "portainer" in res.text.lower() or port in (9000, 9443):
+                            title = "Portainer CE"
+                        elif "Ollama is running" in res.text:
+                            title = "Ollama API"
+                        elif "MediaContainer" in res.text:
+                            title = "Plex Media Server"
+                        elif "application/json" in res.headers.get("content-type", "").lower():
+                            title = f"REST API (Port {port})"
+
+                    if not title and res.status_code == 200:
+                        title = f"Web Service (Port {port})"
+
+                    if title:
+                        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:20] or f"web-{port}"
+                        port_str = f":{port}" if not ((proto == "http" and port == 80) or (proto == "https" and port == 443)) else ""
+                        url_template = f"{proto}://{{guest:{guest_spec}}}{port_str}/"
+
+                        return DiscoveredService(
+                            service_id=slug,
+                            name=f"{title}",
+                            category="custom",
+                            port=port,
+                            protocol=proto,
+                            path="/",
+                            tls_verify=False,
+                            url_template=url_template,
+                            ip=ip,
+                        )
+            except Exception:
+                continue
+
+        return None
 
     async def scan_guest(self, client: ProxmoxClient, guest_info: Dict[str, Any]) -> DiscoveredGuest:
         """Scan a single VM/CT: fetch config, resolve IPs, and probe services."""
@@ -163,11 +238,27 @@ class InventoryDiscovery:
         if status == "running" and ips and not is_self:
             target_ip = ips[0]  # Primary LAN IP
             guest_spec = f"{client.name}/{vmid}"
+
+            # 1. Known fingerprint probes
             tasks = []
             for svc in self.services_catalog:
                 tasks.append(self.probe_http_service(target_ip, svc, guest_spec=guest_spec))
             results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            claimed_ports = set()
             for res in results:
+                if isinstance(res, DiscoveredService):
+                    discovered.services.append(res)
+                    claimed_ports.add(res.port)
+
+            # 2. Dynamic probes on unclaimed common web ports (HTML title scraping)
+            unclaimed_ports = [p for p in self.COMMON_WEB_PORTS if p not in claimed_ports]
+            dynamic_tasks = [
+                self.probe_unknown_web_service(target_ip, p, guest_spec=guest_spec)
+                for p in unclaimed_ports
+            ]
+            dynamic_results = await asyncio.gather(*dynamic_tasks, return_exceptions=True)
+            for res in dynamic_results:
                 if isinstance(res, DiscoveredService):
                     discovered.services.append(res)
 

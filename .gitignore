@@ -1,0 +1,48 @@
+# ==============================================================================
+# Wheatley - Git Ignore Rules
+# ==============================================================================
+
+# Secrets and environment configurations
+*.env
+.env*
+!.env.example
+secrets.env
+*.key
+*.pem
+
+# Local configurations with machine-specific IPs/VMIDs
+config.yaml
+
+# SQLite databases & runtime locks
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.lock
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+logs/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

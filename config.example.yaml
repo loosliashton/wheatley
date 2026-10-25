@@ -1,0 +1,152 @@
+# ==============================================================================
+# Wheatley Homelab Agent - Example Configuration
+# ==============================================================================
+# Copy this file to /etc/wheatley/config.yaml and customize for your homelab.
+# Secrets (tokens, API keys) must be referenced as ${VAR_NAME} and defined in
+# /etc/wheatley/secrets.env (mode 0600).
+# ==============================================================================
+
+# Proxmox Nodes (add one entry per PVE host or cluster node)
+nodes:
+  - name: pve-node-01
+    api_url: "https://192.168.1.10:8006"
+    ssh:
+      host: "192.168.1.10"
+      port: 22
+      user: "wheatley"
+      key_path: "/var/lib/wheatley/.ssh/id_ed25519"
+    tls_fingerprint: "${NODE1_TLS_FINGERPRINT}"
+    tokens:
+      monitor: "${NODE1_TOKEN_MONITOR}"
+      ops: "${NODE1_TOKEN_OPS}"
+
+  - name: pve-node-02
+    api_url: "https://192.168.1.11:8006"
+    ssh:
+      host: "192.168.1.11"
+      port: 22
+      user: "wheatley"
+      key_path: "/var/lib/wheatley/.ssh/id_ed25519"
+    tls_fingerprint: "${NODE2_TLS_FINGERPRINT}"
+    tokens:
+      monitor: "${NODE2_TOKEN_MONITOR}"
+      ops: "${NODE2_TOKEN_OPS}"
+
+# Protect Wheatley from modifying its own container (node/vmid)
+self_guest: "pve-node-01/110"
+
+# Google Cloud & Gemini Budget Settings ($10/mo Developer Program credit)
+budget:
+  monthly_grant_usd: 10.0
+  starting_bank_usd: 0.0
+  warn_threshold_usd: 6.0
+  flash_only_threshold_usd: 8.0
+  pause_threshold_usd: 9.50
+  daily_cap_usd: 2.0
+  model_flash: "gemini-2.5-flash"
+  model_pro: "gemini-2.5-pro"
+
+# Chat Interfaces
+chat:
+  telegram:
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    allowed_user_ids:
+      - ${TELEGRAM_USER_ID}
+    pin: "${HIGH_RISK_PIN:-}"
+
+# Monitored Checks
+checks:
+  # Cluster & Node Health
+  - id: node-health
+    type: node_metrics
+    enabled: true
+    interval_seconds: 60
+    params:
+      nodes: "*"
+      cpu_crit_percent: 90
+      mem_crit_percent: 90
+      duration_minutes: 5
+
+  # Storage Pools
+  - id: storage-health
+    type: storage
+    enabled: true
+    interval_seconds: 120
+    params:
+      nodes: "*"
+      warn_percent: 85
+      crit_percent: 95
+
+  # Guest states (auto-detects all onboot guests)
+  - id: guests-up
+    type: guest_state
+    enabled: true
+    interval_seconds: 60
+    params:
+      select:
+        onboot: true
+      exclude: []
+
+  # Service Health Checks (examples)
+  - id: plex
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:pve-node-01/102}:32400/identity"
+
+  - id: frigate
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:pve-node-01/107}:5000/api/version"
+
+  - id: crafty
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "https://{guest:pve-node-01/108}:8443/"
+      tls_verify: false
+
+  - id: omv
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:pve-node-01/101}/"
+
+  - id: home-assistant
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:pve-node-02/100}:8123/manifest.json"
+
+  # Docker containers on Docker host VM
+  - id: docker-containers
+    type: docker
+    enabled: true
+    interval_seconds: 60
+    params:
+      guest: "pve-node-01/100"
+      containers: "*"
+      alert_on:
+        - exited
+        - unhealthy
+        - restarting
+
+# Commands permitted to run immediately without interactive approval
+allowlist:
+  - "uptime"
+  - "free -m"
+  - "df -h"
+  - "top -b -n 1"
+  - "journalctl -n *"
+  - "systemctl status *"
+  - "docker ps"
+  - "docker logs *"
+  - "zpool status*"
+  - "smartctl -H *"
+  - "sensors -j"

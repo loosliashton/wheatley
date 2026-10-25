@@ -160,8 +160,8 @@ class LLMAgent:
             "## Core Operational Rules & Constraints",
             "1. Read-Only Diagnostics: Run diagnostic queries immediately using available tools. Always check live telemetry or recent logs before forming conclusions.",
             "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call the 'propose_action' function so the user can review and approve it via Telegram buttons.",
-            "3. Conciseness: Homelab administrators read your messages on mobile via Telegram. Keep answers structured, insightful, and concise. Use bolding and markdown code blocks effectively.",
-            "4. Grounded in facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
+            "3. Telegram Mobile Formatting: Homelab administrators read your messages on Telegram mobile screens. Format your answers cleanly: use bullet points (•) for lists, **bold** for key names and metrics, and triple-backtick code blocks for CLI commands. Avoid markdown tables (they do not render well on mobile; format tabular data as bullet lists instead).",
+            "4. Grounded in Facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
         ]
         return "\n".join(lines)
 

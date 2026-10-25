@@ -1,9 +1,9 @@
-"""Tests for Wheatley Gemini Integration & AI Reasoning Loop"""
+"""Tests for Wheatley Gemini Integration & AI Reasoning Loop (Backwards Compatibility)"""
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from wheatley.audit import AuditLogger
@@ -11,13 +11,14 @@ from wheatley.budget import BudgetTracker
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import BudgetConfig, WheatleyConfig
 from wheatley.gemini import GeminiAgent
+from wheatley.llm.base import BaseLLMProvider, LLMResponse, ToolCall
 
 
 @pytest.fixture
 def fake_gemini_env(tmp_path):
     db_path = str(tmp_path / "test_gemini.db")
     audit = AuditLogger(db_path)
-    b_cfg = BudgetConfig(monthly_grant_usd=10.0, daily_cap_usd=2.0, model_flash="gemini-3.8-flash")
+    b_cfg = BudgetConfig(model_flash="gemini-3.8-flash")
     budget = BudgetTracker(b_cfg, audit)
 
     cfg = WheatleyConfig.model_validate({
@@ -65,8 +66,11 @@ def fake_gemini_env(tmp_path):
         check_engine=check_engine,
         proxmox_clients=clients,
     )
-    agent.api_key = "fake_test_key"
-    agent.client = MagicMock()
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "gemini"
+    mock_provider.model_name = "gemini-3.8-flash"
+    agent.provider = mock_provider
     return agent, budget, mock_client
 
 
@@ -122,57 +126,51 @@ def test_tool_self_protection(fake_gemini_env):
 @pytest.mark.asyncio
 async def test_chat_unconfigured(fake_gemini_env):
     agent, _, _ = fake_gemini_env
-    agent.client = None
-    agent.api_key = ""
+    agent.provider.is_configured = False
     res = await agent.chat("Why is Frigate slow?")
-    assert "Gemini AI is unconfigured" in res
-
-
-@pytest.mark.asyncio
-async def test_chat_paused_by_budget(fake_gemini_env):
-    agent, budget, _ = fake_gemini_env
-    agent.client = MagicMock()
-    # Force budget daily limit
-    budget.config.daily_cap_usd = 0.001
-    budget.record_usage("gemini-3.8-flash", 100_000, 100_000)
-
-    res = await agent.chat("What's running?")
-    assert "AI Reasoning Paused" in res
+    assert "unconfigured" in res
 
 
 @pytest.mark.asyncio
 async def test_chat_loop_with_function_calling(fake_gemini_env):
     agent, budget, _ = fake_gemini_env
 
-    mock_client = MagicMock()
-    agent.client = mock_client
-
     # Turn 1: Model calls get_cluster_status
-    mock_func_call = MagicMock()
-    mock_func_call.name = "get_cluster_status"
-    mock_func_call.args = {}
-
-    resp_turn1 = MagicMock()
-    resp_turn1.function_calls = [mock_func_call]
-    resp_turn1.candidates = [MagicMock()]
-    resp_turn1.candidates[0].content = MagicMock()
-    resp_turn1.usage_metadata = MagicMock()
-    resp_turn1.usage_metadata.prompt_token_count = 1200
-    resp_turn1.usage_metadata.candidates_token_count = 50
+    resp_turn1 = LLMResponse(
+        content=None,
+        tool_calls=[ToolCall(id="call_0", name="get_cluster_status", arguments={})],
+        input_tokens=1200,
+        output_tokens=50,
+    )
 
     # Turn 2: Model returns final text
-    resp_turn2 = MagicMock()
-    resp_turn2.function_calls = None
-    resp_turn2.text = "Cluster node-01 is operating normally with CPU at 5% and 2 running guests."
-    resp_turn2.usage_metadata = MagicMock()
-    resp_turn2.usage_metadata.prompt_token_count = 1400
-    resp_turn2.usage_metadata.candidates_token_count = 100
+    resp_turn2 = LLMResponse(
+        content="Cluster node-01 is operating normally with CPU at 5% and 2 running guests.",
+        tool_calls=[],
+        input_tokens=1400,
+        output_tokens=100,
+    )
 
-    mock_client.models.generate_content.side_effect = [resp_turn1, resp_turn2]
+    agent.provider.generate_response = AsyncMock(side_effect=[resp_turn1, resp_turn2])
 
     answer = await agent.chat("How is the cluster doing?")
     assert "Cluster node-01 is operating normally" in answer
-    assert budget.get_monthly_spend() > 0.0
     inp, outp = budget.get_monthly_tokens()
     assert inp == 2600
     assert outp == 150
+
+
+@pytest.mark.asyncio
+async def test_investigate_alert(fake_gemini_env):
+    agent, _, _ = fake_gemini_env
+    agent.provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content="Probable cause: Out of memory on Plex LXC.",
+            tool_calls=[],
+            input_tokens=800,
+            output_tokens=40,
+        )
+    )
+
+    diag = await agent.investigate_alert("plex", "HTTP 503 Service Unavailable")
+    assert "Out of memory" in diag

@@ -14,7 +14,7 @@ from wheatley.budget import BudgetTracker
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
-from wheatley.gemini import GeminiAgent
+from wheatley.llm import LLMAgent, UsageTracker
 from wheatley.webhook import WebhookServer
 
 logging.basicConfig(
@@ -30,10 +30,12 @@ class WheatleyApp:
         self.secrets_path = secrets_path
         self.config: WheatleyConfig = load_config(config_path, secrets_path)
         self.audit = AuditLogger()
+        self.usage = UsageTracker(self.audit)
         self.budget = BudgetTracker(self.config.budget, self.audit)
         self.bot: TelegramBot | None = None
         self.check_engine: CheckEngine | None = None
-        self.gemini_agent: GeminiAgent | None = None
+        self.llm_agent: LLMAgent | None = None
+        self.gemini_agent: LLMAgent | None = None
         self.webhook_server: WebhookServer | None = None
         self._stop_event = asyncio.Event()
 
@@ -95,7 +97,7 @@ class WheatleyApp:
             "📊 *Monitoring & Controls*",
             f"• *Checks Active:* `{len([c for c in self.config.checks if c.enabled])}`",
             f"• *Self-Protection:* `{self.config.self_guest or 'disabled'}`",
-            f"• *Budget Cap:* `${self.config.budget.monthly_grant_usd:.2f}/mo`",
+            f"• *LLM:* `{self.config.llm.provider}` (`{self.config.llm.model}`)",
         ])
         return "\n".join(lines)
 
@@ -134,19 +136,22 @@ class WheatleyApp:
         self.check_engine.start()
         logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
 
-        # 3. Initialize Gemini AI Agent
-        self.gemini_agent = GeminiAgent(
+        # 3. Initialize LLM Agent
+        self.llm_agent = LLMAgent(
             config=self.config,
             audit=self.audit,
-            budget=self.budget,
+            usage=self.usage,
             check_engine=self.check_engine,
             proxmox_clients=self.check_engine.clients,
         )
+        self.gemini_agent = self.llm_agent  # Backwards compatibility
 
         if self.bot:
             self.bot.check_engine = self.check_engine
-            self.bot.gemini_agent = self.gemini_agent
-            self.bot.budget = self.budget
+            self.bot.agent = self.llm_agent
+            self.bot.llm_agent = self.llm_agent
+            self.bot.gemini_agent = self.llm_agent
+            self.bot.budget = self.usage
 
         # 4. Initialize and start Webhook receiver
         if self.config.webhook and self.config.webhook.enabled:
@@ -322,45 +327,47 @@ def cmd_check(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-def cmd_budget(args: argparse.Namespace) -> None:
+def cmd_usage(args: argparse.Namespace) -> None:
     try:
         cfg = load_config(args.config, args.secrets)
         audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
-        budget = BudgetTracker(cfg.budget, audit)
-
-        subcmd = getattr(args, "budget_subcommand", "usage") or "usage"
-        if subcmd == "usage":
-            print(budget.format_usage_markdown())
-        elif subcmd == "set-bank":
-            amount = float(args.amount)
-            budget.set_starting_bank(amount)
-            print(f"✅ Starting carried-over credit bank set to: ${amount:.2f}")
+        usage = UsageTracker(audit)
+        print(usage.format_usage_markdown(provider=cfg.llm.provider, model=cfg.llm.model))
     except Exception as e:
-        print(f"❌ Budget command error: {e}", file=sys.stderr)
+        print(f"❌ Usage command error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_budget(args: argparse.Namespace) -> None:
+    # Retained as backwards-compatible alias to usage
+    cmd_usage(args)
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
     try:
         cfg = load_config(args.config, args.secrets)
         audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
-        budget = BudgetTracker(cfg.budget, audit)
+        usage = UsageTracker(audit)
         check_engine = CheckEngine(cfg, audit)
 
-        agent = GeminiAgent(
+        agent = LLMAgent(
             config=cfg,
             audit=audit,
-            budget=budget,
+            usage=usage,
             check_engine=check_engine,
             proxmox_clients=check_engine.clients,
         )
 
         if not agent.is_configured:
-            print("❌ Gemini AI is not configured. Add GEMINI_API_KEY to secrets.env.", file=sys.stderr)
+            print(
+                f"❌ LLM provider '{agent.provider_name}' is not configured. "
+                "Update 'llm:' in config.yaml and credentials in secrets.env.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         question = " ".join(args.question)
-        print(f"🤖 Wheatley thinking with {agent.model_name}...\n")
+        print(f"🤖 Wheatley thinking with {agent.provider_name} ({agent.model_name})...\n")
         response = asyncio.run(agent.chat(question))
         print(response)
     except Exception as e:
@@ -385,6 +392,12 @@ def main() -> None:
     p_ask.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
     p_ask.add_argument("question", nargs="+", help="Question to ask Wheatley")
 
+    # Usage
+    p_use = subparsers.add_parser("usage", help="Show LLM token consumption and activity")
+    p_use.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
+    p_use.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
+    p_use.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
+
     # Check
     p_chk = subparsers.add_parser("check", help="Check engine utilities")
     p_chk.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
@@ -396,14 +409,14 @@ def main() -> None:
     p_chk_run.add_argument("check_id", help="ID of the check to run")
     p_chk_sub.add_parser("run-all", help="Run all configured checks immediately")
 
-    # Budget
-    p_bud = subparsers.add_parser("budget", help="GCP credit & Gemini budget tracker")
+    # Budget (alias to usage)
+    p_bud = subparsers.add_parser("budget", help="Deprecated alias for 'usage'")
     p_bud.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
     p_bud.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
     p_bud.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
     p_bud_sub = p_bud.add_subparsers(dest="budget_subcommand")
-    p_bud_sub.add_parser("usage", help="Show month-to-date and daily spend")
-    p_bud_bank = p_bud_sub.add_parser("set-bank", help="Set carried-over credit bank balance")
+    p_bud_sub.add_parser("usage", help="Show token consumption")
+    p_bud_bank = p_bud_sub.add_parser("set-bank", help="Legacy command (no-op)")
     p_bud_bank.add_argument("amount", type=float, help="Amount in USD (e.g. 15.00)")
 
     # Discover
@@ -442,8 +455,8 @@ def main() -> None:
     elif args.command == "ask":
         cmd_ask(args)
 
-    elif args.command == "budget":
-        cmd_budget(args)
+    elif args.command in ("usage", "budget"):
+        cmd_usage(args)
 
     elif args.command == "check":
         cmd_check(args)

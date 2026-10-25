@@ -35,16 +35,20 @@ nodes:
 # Protect Wheatley from modifying its own container (node/vmid)
 self_guest: "pve-node-01/110"
 
-# Google Cloud & Gemini Budget Settings ($10/mo Developer Program credit)
-budget:
-  monthly_grant_usd: 10.0
-  starting_bank_usd: 0.0
-  warn_threshold_usd: 6.0
-  flash_only_threshold_usd: 8.0
-  pause_threshold_usd: 9.50
-  daily_cap_usd: 2.0
-  model_flash: "gemini-3.8-flash"
-  model_pro: "gemini-2.5-pro"
+# LLM Provider Configuration (Bring Your Own LLM)
+# Wheatley is LLM-agnostic and supports:
+#   - Google Gemini: provider: "gemini", model: "gemini-3.8-flash"
+#   - Local Ollama:   provider: "ollama", model: "llama3.2", api_base: "http://localhost:11434/v1"
+#   - OpenAI:         provider: "openai", model: "gpt-4o-mini", api_key: "${OPENAI_API_KEY}"
+#   - Groq:           provider: "groq", model: "llama-3.3-70b-versatile", api_key: "${GROQ_API_KEY}"
+#   - Any OpenAI-compatible endpoint (vLLM, LocalAI, DeepSeek, OpenWebUI)
+llm:
+  provider: "gemini"               # Options: gemini, ollama, openai, groq, openai_compatible
+  model: "gemini-3.8-flash"        # Model name
+  api_key: "${GEMINI_API_KEY}"     # Or set via env var (e.g. GEMINI_API_KEY or OPENAI_API_KEY)
+  # api_base: "http://localhost:11434/v1" # Base URL (defaults to localhost:11434/v1 for ollama)
+  temperature: 0.2
+  max_tool_iterations: 10
 
 # Chat Interfaces
 chat:

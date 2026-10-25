@@ -13,7 +13,7 @@ Wheatley is an autonomous administration agent purpose-built for homelab operato
 - 🔒 **Least Privilege & Native Security:** Runs inside a dedicated, unprivileged Debian LXC container. Connects to Proxmox VE nodes using native `@pve` API tokens with `PVEAuditor` permissions.
 - 🌐 **Shareable & Config-Driven:** Zero hardcoded IPs, hostnames, or credentials. Everything lives in `/etc/wheatley/config.yaml` and is backed by environment variable interpolation (`${VAR}`) from `/etc/wheatley/secrets.env`.
 - 📊 **Multi-Node Cluster & Standalone Support:** Monitors single standalone nodes or distributed multi-node topologies.
-- 💰 **LLM Budget Guardrails:** Engineered to run on the $10/month Google Developer Program credit (using `gemini-3.8-flash` for triage and `gemini-2.5-pro` for deep investigation) with an automated credit ledger and spending thresholds.
+- 🤖 **Bring Your Own LLM (LLM-Agnostic):** Plug in your choice of model: Google Gemini, local Ollama (100% offline private homelab models like `llama3.2`, `qwen2.5`, `mistral`), OpenAI (`gpt-4o-mini`), Groq, DeepSeek, vLLM, or any OpenAI-compatible endpoint. No artificial billing limits or execution pauses.
 
 ---
 
@@ -46,7 +46,7 @@ flowchart TD
 1. **Proxmox VE Host** (PVE 8.x or 9.x) with root access.
 2. **Telegram Bot Token** from [@BotFather](https://t.me/botfather).
 3. **Your Numeric Telegram User ID** from [@userinfobot](https://t.me/userinfobot).
-4. **Google AI Studio API Key** (or GCP Project linked to Google Developer Program).
+4. **LLM Credentials**: Google AI Studio API Key, local Ollama instance, OpenAI API Key, Groq, or any OpenAI-compatible provider.
 
 ---
 
@@ -130,9 +130,8 @@ wheatley check run-all
 # Ask Wheatley AI a homelab administration question directly
 wheatley ask "How is the cluster doing?"
 
-# Budget & GCP Credit management
-wheatley budget usage
-wheatley budget set-bank 15.00
+# View LLM token activity telemetry
+wheatley usage
 
 # Inspect the SQLite audit log
 wheatley audit
@@ -146,11 +145,10 @@ wheatley --help
 
 ### Telegram Bot Commands
 From your authorized Telegram chat:
-- **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is Frigate slow?"* or *"What guests are running on cave?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis.
+- **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is Frigate slow?"* or *"What guests are running on cave?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis across any configured LLM.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
 - `/checks` — Displays real-time status of all monitored checks and active mute windows.
-- `/usage` — Displays current month & daily Gemini token consumption against the $10/mo GCP credit.
-- `/budget` — Displays budget safety caps or sets carried-over credit bank (`/budget set-bank <usd>`).
+- `/usage` — Displays current month & daily LLM token consumption and activity.
 - `/investigate <id>` — Triggers automated root-cause diagnosis on any service check.
 - `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute plex 120`).
 - `/unmute <check_id>` — Re-enables alerts for a silenced check.
@@ -184,11 +182,11 @@ From your authorized Telegram chat:
   - Telegram commands: `/checks`, `/mute`, `/unmute`.
   - CLI check utilities: `wheatley check list`, `wheatley check run <id>`, `wheatley check run-all`.
   - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088).
-- [x] **Phase 4: Gemini LLM Integration & Budget Guardrails**
-  - Multi-turn function-calling reasoning loop using `gemini-3.8-flash`.
-  - Dynamic system instruction generated at runtime from cluster inventory without hardcoding IPs.
-  - Tool registry enabling Gemini to query cluster telemetry, guest details, check states, and audit logs.
-  - Token budget guardrails with $10/mo credit ledger, daily cap ($2.00/day), and auto-pause threshold ($9.50).
+- [x] **Phase 4: LLM-Agnostic Reasoning Engine & Tool Registry**
+  - Pluggable provider architecture (`BaseLLMProvider`) supporting native Google Gemini and OpenAI-compatible endpoints (Ollama, OpenAI, Groq, DeepSeek, vLLM, LocalAI).
+  - Multi-turn function-calling reasoning loop using dynamic live cluster inventory instructions.
+  - Tool registry enabling LLMs to query cluster telemetry, guest details, check states, and audit logs.
+  - Token activity telemetry with no artificial billing caps or execution pauses.
   - Conversational AI chat in Telegram and CLI (`wheatley ask`).
   - Inline `[🔍 Investigate]` alert button and `/investigate` command for automated root-cause analysis.
 - [ ] **Phase 5: Secure Remote Terminal Diagnostics**

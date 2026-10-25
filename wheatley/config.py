@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml
 
 
@@ -42,17 +42,39 @@ class NodeConfig(BaseModel):
     tokens: NodeTokensConfig
 
 
+class LLMConfig(BaseModel):
+    provider: str = Field(
+        default="gemini",
+        description="LLM provider: 'gemini', 'openai_compatible', 'ollama', 'openai', 'groq', etc.",
+    )
+    model: str = Field(
+        default="gemini-3.8-flash",
+        description="Model name (e.g. 'gemini-3.8-flash', 'llama3.2', 'gpt-4o-mini')",
+    )
+    api_key: Optional[str] = Field(
+        None,
+        description="API Key (can also be supplied via GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY env vars)",
+    )
+    api_base: Optional[str] = Field(
+        None,
+        description="API Base URL (e.g. 'http://localhost:11434/v1' for Ollama, 'https://api.openai.com/v1')",
+    )
+    temperature: float = Field(0.2, description="Inference temperature")
+    max_tool_iterations: int = Field(10, description="Max function-calling reasoning turns")
+
+
 class BudgetConfig(BaseModel):
-    monthly_grant_usd: float = 10.0
+    """Deprecated: Legacy budget config retained for backwards compatibility."""
+    monthly_grant_usd: float = 0.0
     starting_bank_usd: float = 0.0
-    warn_threshold_usd: float = 6.0
-    flash_only_threshold_usd: float = 8.0
-    pause_threshold_usd: float = 9.50
-    daily_cap_usd: float = 2.0
+    warn_threshold_usd: float = 0.0
+    flash_only_threshold_usd: float = 0.0
+    pause_threshold_usd: float = 0.0
+    daily_cap_usd: float = 0.0
     model_flash: str = "gemini-3.8-flash"
     model_pro: str = "gemini-3.8-flash"
-    input_cost_per_million: float = 0.15
-    output_cost_per_million: float = 0.60
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
     max_tool_iterations: int = 10
 
 
@@ -98,6 +120,7 @@ class WebhookConfig(BaseModel):
 class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
     self_guest: Optional[str] = Field(None, description="e.g. cave/110 to protect agent self")
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     chat: ChatConfig
     checks: List[CheckConfig] = Field(default_factory=list)
@@ -117,6 +140,28 @@ class WheatleyConfig(BaseModel):
             "sensors -j",
         ]
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_legacy_budget(cls, data: Any) -> Any:
+        """Map legacy budget block to llm block if llm is not explicitly provided."""
+        if isinstance(data, dict):
+            if "budget" in data and isinstance(data["budget"], dict):
+                b = data["budget"]
+                if "llm" not in data:
+                    data["llm"] = {
+                        "provider": "gemini",
+                        "model": b.get("model_flash", "gemini-3.8-flash"),
+                        "max_tool_iterations": b.get("max_tool_iterations", 10),
+                    }
+            elif "llm" in data and isinstance(data["llm"], dict):
+                l_cfg = data["llm"]
+                if "budget" not in data:
+                    data["budget"] = {
+                        "model_flash": l_cfg.get("model", "gemini-3.8-flash"),
+                        "max_tool_iterations": l_cfg.get("max_tool_iterations", 10),
+                    }
+        return data
 
     @field_validator("nodes")
     @classmethod

@@ -34,6 +34,7 @@ class TelegramBot(ChatInterface):
         discovery_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
         check_engine: Optional[Any] = None,
         gemini_agent: Optional[Any] = None,
+        llm_agent: Optional[Any] = None,
         budget: Optional[Any] = None,
     ):
         self.config = config
@@ -41,7 +42,7 @@ class TelegramBot(ChatInterface):
         self.status_provider = status_provider
         self.discovery_provider = discovery_provider
         self.check_engine = check_engine
-        self.gemini_agent = gemini_agent
+        self.agent = llm_agent or gemini_agent
         self.budget = budget
         self.allowed_users: Set[int] = set(config.allowed_user_ids)
         self.primary_chat_id: Optional[int] = config.allowed_user_ids[0] if config.allowed_user_ids else None
@@ -49,6 +50,22 @@ class TelegramBot(ChatInterface):
         self.proposal_callback: Optional[Callable[[str, bool, int], Coroutine[Any, Any, None]]] = None
         self._custom_commands: Dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
         self._register_internal_handlers()
+
+    @property
+    def gemini_agent(self) -> Optional[Any]:
+        return self.agent
+
+    @gemini_agent.setter
+    def gemini_agent(self, value: Any) -> None:
+        self.agent = value
+
+    @property
+    def llm_agent(self) -> Optional[Any]:
+        return self.agent
+
+    @llm_agent.setter
+    def llm_agent(self, value: Any) -> None:
+        self.agent = value
 
     def _is_authorized(self, update: Update) -> bool:
         if not update.effective_user:
@@ -74,7 +91,6 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("mute", self._cmd_mute))
         self.app.add_handler(CommandHandler("unmute", self._cmd_unmute))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage))
-        self.app.add_handler(CommandHandler("budget", self._cmd_budget))
         self.app.add_handler(CommandHandler("investigate", self._cmd_investigate))
         self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
@@ -90,7 +106,7 @@ class TelegramBot(ChatInterface):
             f"I'm *Wheatley*, your homelab monitoring & AI administration agent.\n\n"
             f"• `/status` - Check node and service health\n"
             f"• `/checks` - View all active checks & mute states\n"
-            f"• `/usage` - View Gemini AI token spend & budget\n"
+            f"• `/usage` - View LLM token spend & activity\n"
             f"• `/discover` - Auto-detect services & containers\n"
             f"• `/audit` - Inspect recent action logs\n"
             f"• `/help` - See all available commands\n\n"
@@ -106,8 +122,7 @@ class TelegramBot(ChatInterface):
             "🛠 *Wheatley Commands*\n\n"
             "/status - Cluster & guest health overview\n"
             "/checks - View all health checks and mute status\n"
-            "/usage - GCP credit & Gemini token spend\n"
-            "/budget - View budget caps or set carried bank\n"
+            "/usage - LLM token consumption & activity\n"
             "/investigate <id> - Run AI diagnosis on a service\n"
             "/mute <id> [mins] - Silence alerts for a check\n"
             "/unmute <id> - Re-enable alerts for a check\n"
@@ -264,44 +279,17 @@ class TelegramBot(ChatInterface):
     async def _cmd_usage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
-        if self.budget:
+        if self.agent and hasattr(self.agent, "usage"):
+            msg = self.agent.usage.format_usage_markdown(
+                provider=getattr(self.agent, "provider_name", "llm"),
+                model=getattr(self.agent, "model_name", "default"),
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        elif self.budget:
             msg = self.budget.format_usage_markdown()
             await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("⚠️ Budget tracker is not connected.")
-
-    async def _cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._is_authorized(update):
-            return
-        if not self.budget:
-            await update.message.reply_text("⚠️ Budget tracker is not connected.")
-            return
-
-        args = context.args or []
-        if args and args[0] == "set-bank" and len(args) > 1:
-            try:
-                amount = float(args[1])
-                self.budget.set_starting_bank(amount)
-                await update.message.reply_text(
-                    f"✅ Carried-over credit bank set to `${amount:.2f}`.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            except ValueError:
-                await update.message.reply_text("❌ Usage: `/budget set-bank <amount>` (e.g. `/budget set-bank 15.50`)")
-            return
-
-        msg = (
-            "💰 *Budget Guardrails & Management*\n\n"
-            f"• *Monthly Grant:* `${self.budget.config.monthly_grant_usd:.2f}/mo`\n"
-            f"• *Warn Threshold:* `${self.budget.config.warn_threshold_usd:.2f}`\n"
-            f"• *Pause Threshold:* `${self.budget.config.pause_threshold_usd:.2f}` (+ bank)\n"
-            f"• *Daily Spend Cap:* `${self.budget.config.daily_cap_usd:.2f}/day`\n"
-            f"• *Carried-over Bank:* `${self.budget.get_carried_over_bank():.2f}`\n\n"
-            "Commands:\n"
-            "• `/usage` - Show month-to-date and daily consumption\n"
-            "• `/budget set-bank <usd>` - Set carried-over credit bank balance"
-        )
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text("⚠️ Token usage tracker is not connected.")
 
     async def _cmd_investigate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -312,15 +300,16 @@ class TelegramBot(ChatInterface):
             return
 
         check_id = args[0]
-        if not self.gemini_agent or not self.gemini_agent.is_configured:
-            await update.message.reply_text("⚠️ Gemini AI is not configured.")
+        if not self.agent or not self.agent.is_configured:
+            await update.message.reply_text("⚠️ LLM is not configured.")
             return
 
+        model_name = getattr(self.agent, "model_name", "LLM")
         await update.message.reply_text(
-            f"🔍 *Investigating `{check_id}` with Gemini 3.8 Flash...*",
+            f"🔍 *Investigating `{check_id}` with {model_name}...*",
             parse_mode=ParseMode.MARKDOWN,
         )
-        diagnosis = await self.gemini_agent.investigate_alert(check_id, f"Manual investigation triggered for {check_id}")
+        diagnosis = await self.agent.investigate_alert(check_id, f"Manual investigation triggered for {check_id}")
         try:
             await update.message.reply_text(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", parse_mode=ParseMode.MARKDOWN)
         except Exception:
@@ -366,13 +355,14 @@ class TelegramBot(ChatInterface):
 
         elif data.startswith("investigate:"):
             check_id = data.split(":", 1)[1]
-            if self.gemini_agent:
+            if self.agent and self.agent.is_configured:
+                model_name = getattr(self.agent, "model_name", "LLM")
                 self.audit.log_event("AI", f"tg:{user_id}", f"investigate:{check_id}", "TRIGGERED")
                 await query.message.reply_text(
-                    f"🔍 *Wheatley is investigating `{check_id}` with Gemini 3.8 Flash...*\n_Analyzing live telemetry and check state._",
+                    f"🔍 *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
                     parse_mode=ParseMode.MARKDOWN,
                 )
-                diagnosis = await self.gemini_agent.investigate_alert(
+                diagnosis = await self.agent.investigate_alert(
                     check_id=check_id,
                     issue_summary=f"Alert investigation requested for {check_id}",
                 )
@@ -387,7 +377,7 @@ class TelegramBot(ChatInterface):
                         parse_mode=None,
                     )
             else:
-                await query.message.reply_text("⚠️ Gemini AI agent is not connected.")
+                await query.message.reply_text("⚠️ LLM agent is not configured.")
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -398,13 +388,13 @@ class TelegramBot(ChatInterface):
 
         self.audit.log_event("CHAT", f"tg:{update.effective_user.id}", "user_message", "RECEIVED", details={"text": text[:100]})
 
-        if self.gemini_agent and self.gemini_agent.is_configured:
+        if self.agent and self.agent.is_configured:
             try:
                 await update.message.chat.send_action("typing")
             except Exception:
                 pass
 
-            response = await self.gemini_agent.chat(text)
+            response = await self.agent.chat(text)
             try:
                 await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
             except Exception as e:
@@ -413,7 +403,7 @@ class TelegramBot(ChatInterface):
         else:
             await update.message.reply_text(
                 f"Received: \"{text}\"\n\n"
-                "_(Note: Gemini AI is not configured. Add GEMINI_API_KEY to `/etc/wheatley/secrets.env` and restart Wheatley.)_",
+                "_(Note: LLM is not configured. Configure `llm:` in `/etc/wheatley/config.yaml` and set credentials in `/etc/wheatley/secrets.env`.)_",
                 parse_mode=ParseMode.MARKDOWN,
             )
 

@@ -362,11 +362,11 @@ class InventoryDiscovery:
                     }
                 )
 
-        # Re-use existing nodes, budget, chat, allowlist from active config
+        # Re-use existing nodes, llm, chat, allowlist from active config
         draft: Dict[str, Any] = {
             "nodes": [n.model_dump() for n in self.config.nodes],
             "self_guest": self_guest_spec or self.config.self_guest,
-            "budget": self.config.budget.model_dump(),
+            "llm": self.config.llm.model_dump(),
             "chat": self.config.chat.model_dump(exclude_none=True),
             "checks": checks,
             "allowlist": self.config.allowlist,

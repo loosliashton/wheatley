@@ -106,7 +106,7 @@ class AuditLogger:
         cost_usd: float = 0.0,
     ) -> int:
         now_iso = datetime.now(timezone.utc).isoformat()
-        details_str = json.dumps(details) if isinstance(details, dict) else (details or "")
+        details_str = json.dumps(details, default=str) if isinstance(details, (dict, list)) else (details or "")
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(

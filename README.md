@@ -122,6 +122,11 @@ wheatley discover --output /etc/wheatley/config.draft.yaml
 # Validate configuration and secrets
 wheatley config validate
 
+# Check engine utilities
+wheatley check list
+wheatley check run node-health
+wheatley check run-all
+
 # Inspect the SQLite audit log
 wheatley audit
 
@@ -134,9 +139,13 @@ wheatley --help
 
 ### Telegram Bot Commands
 From your authorized Telegram chat:
-- `/start` — Verifies authentication and registers your session.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
+- `/checks` — Displays real-time status of all monitored checks and active mute windows.
+- `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute plex 120`).
+- `/unmute <check_id>` — Re-enables alerts for a silenced check.
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
+- `/audit` — Views recent security, webhook, and operational audit events.
+- `/help` — Displays command cheat sheet and operational guidelines.
 
 ---
 
@@ -155,9 +164,15 @@ From your authorized Telegram chat:
   - Service fingerprint database (`wheatley/discovery/services.yaml`).
   - Automated guest & service scanning (`wheatley discover` and `/discover`).
   - Draft configuration generator (`--output config.draft.yaml`).
-- [ ] **Phase 3: Check Engine & Webhooks**
-  - Built-in checks (`node_metrics`, `storage`, `guest_state`, `http`, `docker`).
-  - Proxmox `vzdump` backup notification webhook receiver.
+- [x] **Phase 3: Check Engine, Alerting & Webhooks**
+  - Check engine scheduler (APScheduler) with pluggable check types.
+  - Built-in checks (`http`, `node_metrics`, `storage`, `guest_state`, `tcp`, `docker`).
+  - Dynamic `{guest:node/vmid}` IP resolution for DHCP resilience.
+  - Alert state transitions (`OK` -> `CRIT` alert, `CRIT` -> `OK` resolved) with deduplication.
+  - Interactive Telegram alert notifications with inline `[🔕 Mute 1h]` / `[🔕 Mute 24h]` buttons.
+  - Telegram commands: `/checks`, `/mute`, `/unmute`.
+  - CLI check utilities: `wheatley check list`, `wheatley check run <id>`, `wheatley check run-all`.
+  - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088).
 - [ ] **Phase 4: Gemini LLM Integration**
   - Function-calling loop with `gemini-3.8-flash` / `gemini-2.5-pro`.
   - Token budget guardrails and $10/mo credit ledger.

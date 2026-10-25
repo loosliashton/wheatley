@@ -85,12 +85,20 @@ class CheckConfig(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
+class WebhookConfig(BaseModel):
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8088
+    secret_token: Optional[str] = None
+
+
 class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
     self_guest: Optional[str] = Field(None, description="e.g. cave/110 to protect agent self")
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     chat: ChatConfig
     checks: List[CheckConfig] = Field(default_factory=list)
+    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     allowlist: List[str] = Field(
         default_factory=lambda: [
             "uptime",

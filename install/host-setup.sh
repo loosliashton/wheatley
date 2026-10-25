@@ -73,3 +73,8 @@ if [[ -n "$FINGERPRINT" ]]; then
   echo "${NODE_NAME^^}_TLS_FINGERPRINT=\"${FINGERPRINT}\""
 fi
 echo "================================================="
+echo " Optional: PVE Notification Webhook Setup (PVE 8.1+)"
+echo " To send backup failure alerts directly to Wheatley:"
+echo "   pvenode notifications target add webhook wheatley \\"
+echo "     --url \"http://<WHEATLEY_IP>:8088/webhook/pve\" --method POST"
+echo "================================================="

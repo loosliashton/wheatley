@@ -32,11 +32,13 @@ class TelegramBot(ChatInterface):
         audit: AuditLogger,
         status_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
         discovery_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
+        check_engine: Optional[Any] = None,
     ):
         self.config = config
         self.audit = audit
         self.status_provider = status_provider
         self.discovery_provider = discovery_provider
+        self.check_engine = check_engine
         self.allowed_users: Set[int] = set(config.allowed_user_ids)
         self.primary_chat_id: Optional[int] = config.allowed_user_ids[0] if config.allowed_user_ids else None
         self.app: Application = ApplicationBuilder().token(config.bot_token).build()
@@ -64,6 +66,9 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
+        self.app.add_handler(CommandHandler("checks", self._cmd_checks))
+        self.app.add_handler(CommandHandler("mute", self._cmd_mute))
+        self.app.add_handler(CommandHandler("unmute", self._cmd_unmute))
         self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -77,6 +82,7 @@ class TelegramBot(ChatInterface):
             f"👋 *Greetings, {user_name}!*\n\n"
             f"I'm *Wheatley*, your homelab monitoring & AI administration agent.\n\n"
             f"• `/status` - Check node and service health\n"
+            f"• `/checks` - View all active checks & mute states\n"
             f"• `/discover` - Auto-detect services & containers\n"
             f"• `/audit` - Inspect recent action logs\n"
             f"• `/help` - See all available commands\n\n"
@@ -91,10 +97,12 @@ class TelegramBot(ChatInterface):
         help_text = (
             "🛠 *Wheatley Commands*\n\n"
             "/status - Cluster & guest health overview\n"
+            "/checks - View all health checks and mute status\n"
+            "/mute <id> [mins] - Silence alerts for a check (e.g. /mute plex 120)\n"
+            "/unmute <id> - Re-enable alerts for a check\n"
             "/discover - Probe nodes & guests to discover active services\n"
             "/audit - Recent security and activity audit log\n"
             "/usage - GCP credit and token consumption\n"
-            "/mute <check_id> <mins> - Temporarily silence alerts\n"
             "/help - Display this manual\n"
         )
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -142,6 +150,106 @@ class TelegramBot(ChatInterface):
             )
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+    async def _cmd_checks(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if not self.check_engine:
+            await update.message.reply_text("⚠️ Check engine is not connected to bot.")
+            return
+
+        states = self.check_engine.get_check_states()
+        if not states:
+            await update.message.reply_text("ℹ️ No health checks currently configured.")
+            return
+
+        lines = [f"🔍 *Wheatley Monitored Checks ({len(states)})*\n"]
+        for s in states:
+            cid = s["id"]
+            ctype = s["type"]
+            status = s["status"]
+            is_muted = s["is_muted"]
+            muted_until = s["muted_until"]
+
+            if is_muted:
+                until_str = muted_until.strftime("%H:%M UTC") if muted_until else "muted"
+                icon = "🔕"
+                status_str = f"MUTED (until {until_str})"
+            elif status == "OK":
+                icon = "🟢"
+                status_str = "OK"
+            elif status == "WARN":
+                icon = "⚠️"
+                status_str = "WARN"
+            elif status == "CRIT":
+                icon = "🚨"
+                status_str = f"CRIT ({s['consecutive_failures']} failures)"
+            else:
+                icon = "⚪️"
+                status_str = status
+
+            lines.append(f"{icon} `{cid}` ({ctype}): *{status_str}*")
+
+        lines.append("\n_Use `/mute <id> [mins]` to silence alerts, or `/unmute <id>`._")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_mute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if not self.check_engine:
+            await update.message.reply_text("⚠️ Check engine is not connected.")
+            return
+
+        args = context.args or []
+        if not args:
+            states = self.check_engine.get_check_states()
+            check_ids = [f"`{s['id']}`" for s in states]
+            msg = (
+                "⚠️ *Usage:* `/mute <check_id> [minutes]`\n"
+                "Example: `/mute plex 120` (default: 60 minutes)\n\n"
+                f"Available checks: {', '.join(check_ids) if check_ids else 'None'}"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            return
+
+        check_id = args[0]
+        minutes = 60
+        if len(args) > 1:
+            try:
+                minutes = int(args[1])
+            except ValueError:
+                await update.message.reply_text("❌ Minutes must be a whole number, e.g. `/mute plex 60`")
+                return
+
+        until = self.check_engine.mute_check(check_id, minutes)
+        if not until:
+            await update.message.reply_text(f"❌ Check `{check_id}` not found.", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        until_str = until.strftime("%Y-%m-%d %H:%M:%S UTC")
+        await update.message.reply_text(
+            f"🔕 *Muted check* `{check_id}` for {minutes} minutes.\nAlerts silenced until `{until_str}`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    async def _cmd_unmute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if not self.check_engine:
+            await update.message.reply_text("⚠️ Check engine is not connected.")
+            return
+
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("⚠️ *Usage:* `/unmute <check_id>`", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        check_id = args[0]
+        success = self.check_engine.unmute_check(check_id)
+        if success:
+            await update.message.reply_text(f"🔔 *Unmuted check* `{check_id}`. Alerts are re-enabled.", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(f"❌ Check `{check_id}` not found.", parse_mode=ParseMode.MARKDOWN)
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not self._is_authorized(update):
@@ -166,6 +274,19 @@ class TelegramBot(ChatInterface):
             await query.message.reply_text(f"❌ *Proposal {proposal_id} denied.*")
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, False, user_id)
+
+        elif data.startswith("mute:"):
+            parts = data.split(":")
+            check_id = parts[1]
+            minutes = int(parts[2]) if len(parts) > 2 else 60
+            if self.check_engine:
+                until = self.check_engine.mute_check(check_id, minutes)
+                until_str = until.strftime("%H:%M UTC") if until else f"{minutes}m"
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    f"🔕 *Muted check* `{check_id}` for {minutes}m (until `{until_str}`).",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -249,3 +370,37 @@ class TelegramBot(ChatInterface):
     ) -> None:
         self._custom_commands[command] = handler
         self.app.add_handler(CommandHandler(command, handler))
+
+    async def send_alert(self, text: str, extra: Optional[Dict[str, Any]] = None) -> Any:
+        if not self.primary_chat_id:
+            logger.warning("Cannot send alert: primary_chat_id is unset.")
+            return None
+
+        keyboard = None
+        if extra and extra.get("type") == "alert" and extra.get("check_id"):
+            check_id = extra["check_id"]
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("🔕 Mute 1h", callback_data=f"mute:{check_id}:60"),
+                        InlineKeyboardButton("🔕 Mute 24h", callback_data=f"mute:{check_id}:1440"),
+                    ]
+                ]
+            )
+
+        try:
+            return await self.app.bot.send_message(
+                chat_id=self.primary_chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.warning("Markdown alert send failed (%s), falling back to raw text", e)
+            return await self.app.bot.send_message(
+                chat_id=self.primary_chat_id,
+                text=text,
+                parse_mode=None,
+                reply_markup=keyboard,
+            )
+

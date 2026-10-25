@@ -11,7 +11,9 @@ from pathlib import Path
 
 from wheatley.audit import AuditLogger
 from wheatley.chat.telegram import TelegramBot
+from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
+from wheatley.webhook import WebhookServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,8 @@ class WheatleyApp:
         self.config: WheatleyConfig = load_config(config_path, secrets_path)
         self.audit = AuditLogger()
         self.bot: TelegramBot | None = None
+        self.check_engine: CheckEngine | None = None
+        self.webhook_server: WebhookServer | None = None
         self._stop_event = asyncio.Event()
 
     async def get_status_overview(self) -> str:
@@ -106,6 +110,7 @@ class WheatleyApp:
         logger.info("Starting Wheatley daemon...")
         self.audit.log_event("SYSTEM", "daemon", "startup", "SUCCESS")
 
+        # 1. Initialize Telegram bot if configured
         if self.config.chat.telegram:
             self.bot = TelegramBot(
                 config=self.config.chat.telegram,
@@ -113,6 +118,32 @@ class WheatleyApp:
                 status_provider=self.get_status_overview,
                 discovery_provider=self.run_discovery_summary,
             )
+
+        alert_sink = self.bot.send_alert if self.bot else None
+
+        # 2. Initialize and start Check Engine
+        self.check_engine = CheckEngine(
+            config=self.config,
+            audit=self.audit,
+            alert_sink=alert_sink,
+        )
+        if self.bot:
+            self.bot.check_engine = self.check_engine
+
+        self.check_engine.start()
+        logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
+
+        # 3. Initialize and start Webhook receiver
+        if self.config.webhook and self.config.webhook.enabled:
+            self.webhook_server = WebhookServer(
+                config=self.config.webhook,
+                audit=self.audit,
+                alert_sink=alert_sink,
+            )
+            await self.webhook_server.start()
+
+        # 4. Start Telegram bot
+        if self.bot:
             await self.bot.start()
             logger.info("Telegram interface active.")
         else:
@@ -129,6 +160,10 @@ class WheatleyApp:
         await self._stop_event.wait()
 
         logger.info("Shutting down Wheatley...")
+        if self.webhook_server:
+            await self.webhook_server.stop()
+        if self.check_engine:
+            self.check_engine.stop()
         if self.bot:
             await self.bot.stop()
         self.audit.log_event("SYSTEM", "daemon", "shutdown", "SUCCESS")
@@ -206,6 +241,72 @@ def cmd_audit(args: argparse.Namespace) -> None:
             print(f"       Details: {row['details']}")
 
 
+def cmd_check(args: argparse.Namespace) -> None:
+    from wheatley.checks.engine import CheckEngine
+    from wheatley.checks.base import CheckStatus
+
+    try:
+        cfg = load_config(args.config, args.secrets)
+        audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
+        engine = CheckEngine(cfg, audit)
+
+        subcmd = getattr(args, "check_subcommand", "list") or "list"
+
+        if subcmd == "list":
+            states = engine.get_check_states()
+            print(f"=== Configured Checks ({len(states)}) ===")
+            for s in states:
+                chk = engine.checks.get(s["id"])
+                interval = chk.config.interval_seconds if chk else 60
+                print(f"• [{s['type']}] {s['id']} (interval: {interval}s)")
+                if chk and chk.params:
+                    print(f"    Params: {chk.params}")
+            return
+
+        elif subcmd == "run":
+            check_id = args.check_id
+            if check_id not in engine.checks:
+                print(f"❌ Check '{check_id}' not found in configuration.", file=sys.stderr)
+                sys.exit(1)
+
+            print(f"Executing check '{check_id}'...")
+            res = asyncio.run(engine.execute_check(check_id))
+            status_icon = "🟢" if res.status == CheckStatus.OK else ("⚠️" if res.status == CheckStatus.WARN else "🚨")
+            print(f"{status_icon} Status: {res.status.value}")
+            print(f"Summary: {res.summary}")
+            if res.metrics:
+                print(f"Metrics: {res.metrics}")
+            if res.details:
+                print(f"Details: {res.details}")
+            sys.exit(0 if res.is_healthy else 1)
+
+        elif subcmd == "run-all":
+            print(f"Executing all {len(engine.checks)} configured checks...\n")
+
+            async def _run_all():
+                results = []
+                for cid in engine.checks:
+                    r = await engine.execute_check(cid)
+                    results.append(r)
+                return results
+
+            results = asyncio.run(_run_all())
+            print(f"{'ID':<20} {'STATUS':<8} {'SUMMARY'}")
+            print("-" * 70)
+            has_failure = False
+            for r in results:
+                if not r.is_healthy:
+                    has_failure = True
+                status_icon = "🟢" if r.status == CheckStatus.OK else ("⚠️" if r.status == CheckStatus.WARN else "🚨")
+                print(f"{r.check_id:<20} {status_icon} {r.status.value:<6} {r.summary}")
+            sys.exit(1 if has_failure else 0)
+
+    except Exception as e:
+        print(f"❌ Check command error: {e}", file=sys.stderr)
+        logger.exception("Check command failed: %s", e)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Wheatley - Homelab Monitoring & AI Agent")
     subparsers = parser.add_subparsers(dest="command")
@@ -214,6 +315,17 @@ def main() -> None:
     p_run = subparsers.add_parser("run", help="Run the Wheatley monitoring agent daemon")
     p_run.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
     p_run.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
+
+    # Check
+    p_chk = subparsers.add_parser("check", help="Check engine utilities")
+    p_chk.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
+    p_chk.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
+    p_chk.add_argument("--db", default="/var/lib/wheatley/wheatley.db", help="Path to audit DB")
+    p_chk_sub = p_chk.add_subparsers(dest="check_subcommand")
+    p_chk_sub.add_parser("list", help="List all configured health checks")
+    p_chk_run = p_chk_sub.add_parser("run", help="Run a specific check immediately")
+    p_chk_run.add_argument("check_id", help="ID of the check to run")
+    p_chk_sub.add_parser("run-all", help="Run all configured checks immediately")
 
     # Discover
     p_disc = subparsers.add_parser("discover", help="Scan Proxmox nodes and auto-discover guests/services")
@@ -247,6 +359,9 @@ def main() -> None:
         except Exception as e:
             logger.exception("Fatal startup error: %s", e)
             sys.exit(1)
+
+    elif args.command == "check":
+        cmd_check(args)
 
     elif args.command == "discover":
         cmd_discover(args)

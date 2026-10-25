@@ -54,6 +54,13 @@ chat:
       - ${TELEGRAM_USER_ID}
     pin: "${HIGH_RISK_PIN:-}"
 
+# Proxmox Notification Webhook Receiver (receives backup failure alerts etc.)
+webhook:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8088
+  secret_token: "${WEBHOOK_SECRET_TOKEN:-}"
+
 # Monitored Checks
 checks:
   # Cluster & Node Health

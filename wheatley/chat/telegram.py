@@ -562,10 +562,9 @@ class TelegramBot(ChatInterface):
             if self.agent and getattr(self.agent, "is_configured", False) and prop:
                 chat_id = str(query.message.chat_id) if query.message else "default"
                 continuation = (
-                    f"Command '{prop.command}' on target '{prop.target}' was executed.\n"
+                    f"Command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
                     f"Execution output:\n{res}\n\n"
-                    "Synthesize your final answer directly for the user using this output. "
-                    "Do not run additional diagnostic commands unless strictly necessary."
+                    "Please continue your analysis and answer my previous question based on this output."
                 )
                 try:
                     async with TypingIndicator(query.message.chat if query.message else None):
@@ -601,10 +600,9 @@ class TelegramBot(ChatInterface):
             if self.agent and getattr(self.agent, "is_configured", False) and prop:
                 chat_id = str(query.message.chat_id) if query.message else "default"
                 continuation = (
-                    f"Command '{prop.command}' on target '{prop.target}' was permanently allowed and executed.\n"
+                    f"Command rule '{prop.pattern}' on target '{prop.target}' was permanently allowed and executed.\n"
                     f"Execution output:\n{res}\n\n"
-                    "Synthesize your final answer directly for the user using this output. "
-                    "Do not run additional diagnostic commands unless strictly necessary."
+                    "Please continue your analysis and answer my previous question based on this output."
                 )
                 try:
                     async with TypingIndicator(query.message.chat if query.message else None):
@@ -659,11 +657,26 @@ class TelegramBot(ChatInterface):
         elif data.startswith("deny:"):
             proposal_id = data.split(":", 1)[1]
             self.approvals.resolve_proposal(proposal_id, "DENY", user_id)
+            prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"deny:{proposal_id}", "DENIED")
             await query.edit_message_reply_markup(reply_markup=None)
-            await self._send_or_reply(f"❌ *Proposal {proposal_id} denied.*", target=query.message)
+            cmd_name = prop.command if prop else f"Proposal {proposal_id}"
+            await self._send_or_reply(f"❌ *Denied permission for `{cmd_name}`.*", target=query.message)
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, False, user_id)
+
+            if self.agent and getattr(self.agent, "is_configured", False) and prop:
+                chat_id = str(query.message.chat_id) if query.message else "default"
+                continuation = (
+                    f"Permission to run command '{prop.command}' on target '{prop.target}' was denied by the user.\n"
+                    "Conclude your previous inquiry without running or re-requesting this command."
+                )
+                try:
+                    async with TypingIndicator(query.message.chat if query.message else None):
+                        followup = await self.agent.chat(continuation, chat_id=chat_id)
+                    await self._send_or_reply(followup, target=query.message)
+                except Exception as e:
+                    logger.exception("Agent failed to handle denial continuation: %s", e)
 
         elif data.startswith("mute:"):
             parts = data.split(":")

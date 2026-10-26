@@ -16,11 +16,20 @@ from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinit
 from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker
-from wheatley.tools.allowlist import is_command_allowed, validate_proposed_pattern
+from wheatley.tools.allowlist import DEFAULT_ALLOWLIST, is_command_allowed, validate_proposed_pattern
 from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.llm.agent")
+
+
+class CommandExecutionHalted(Exception):
+    """Raised when an unallowed command halts the reasoning loop awaiting user approval."""
+
+    def __init__(self, proposal: Any, halt_message: str):
+        self.proposal = proposal
+        self.halt_message = halt_message
+        super().__init__(halt_message)
 
 
 class LLMAgent:
@@ -246,6 +255,8 @@ class LLMAgent:
                 )
             else:
                 return {"error": f"Unknown tool: '{name}'"}
+        except CommandExecutionHalted:
+            raise
         except Exception as e:
             logger.exception("Error executing tool '%s': %s", name, e)
             return {"error": str(e)}
@@ -334,10 +345,10 @@ class LLMAgent:
     async def _tool_run_host_command(self, node: str, command: str) -> Dict[str, Any]:
         target = node
         active_user_rules = self.approvals.get_active_allowlist(target)
-        effective_allowlist = list(self.config.allowlist) + active_user_rules
+        effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
         allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
-            logger.info("Host command '%s' on %s blocked by allowlist (%s); proposing allowlist rule", command, node, reason)
+            logger.info("Host command '%s' on %s blocked by allowlist (%s); halting for approval", command, node, reason)
             cmd_parts = command.strip().split()
             candidate_pattern = None
             if len(cmd_parts) >= 2:
@@ -358,26 +369,11 @@ class LLMAgent:
                 risk="LOW",
             )
             self._dispatch_proposal(prop)
-            proposal_dict = {
-                "id": prop.id,
-                "target": target,
-                "command": command,
-                "summary": prop.summary,
-                "risk": prop.risk,
-            }
-            return {
-                "status": "REQUIRES_APPROVAL",
-                "proposal_id": prop.id,
-                "proposal_type": prop.proposal_type,
-                "target": target,
-                "command": command,
-                "pattern": candidate_pattern,
-                "proposal": proposal_dict,
-                "message": (
-                    f"Command '{command}' is not in the read-only allowlist ({reason}). "
-                    f"An interactive approval proposal ({prop.id}) has been presented to the user to Run Once or Always Allow on {target}."
-                ),
-            }
+            halt_msg = (
+                f"I need permission to execute `{command}` on `{target}` to proceed with your request. "
+                "Please choose whether to allow this command using the options below."
+            )
+            raise CommandExecutionHalted(proposal=prop, halt_message=halt_msg)
 
         res = await self.shell.execute_on_host(node, command, timeout=20)
         return {
@@ -393,10 +389,10 @@ class LLMAgent:
     async def _tool_run_guest_command(self, node: str, vmid: int, command: str) -> Dict[str, Any]:
         target = f"{node}/{vmid}"
         active_user_rules = self.approvals.get_active_allowlist(target)
-        effective_allowlist = list(self.config.allowlist) + active_user_rules
+        effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
         allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
-            logger.info("Guest command '%s' on %s blocked by allowlist (%s); proposing allowlist rule", command, target, reason)
+            logger.info("Guest command '%s' on %s blocked by allowlist (%s); halting for approval", command, target, reason)
             cmd_parts = command.strip().split()
             candidate_pattern = None
             if len(cmd_parts) >= 2:
@@ -417,26 +413,11 @@ class LLMAgent:
                 risk="LOW",
             )
             self._dispatch_proposal(prop)
-            proposal_dict = {
-                "id": prop.id,
-                "target": target,
-                "command": command,
-                "summary": prop.summary,
-                "risk": prop.risk,
-            }
-            return {
-                "status": "REQUIRES_APPROVAL",
-                "proposal_id": prop.id,
-                "proposal_type": prop.proposal_type,
-                "target": target,
-                "command": command,
-                "pattern": candidate_pattern,
-                "proposal": proposal_dict,
-                "message": (
-                    f"Command '{command}' is not in the read-only allowlist ({reason}). "
-                    f"An interactive approval proposal ({prop.id}) has been presented to the user to Run Once or Always Allow on {target}."
-                ),
-            }
+            halt_msg = (
+                f"I need permission to execute `{command}` on `{target}` to proceed with your request. "
+                "Please choose whether to allow this command using the options below."
+            )
+            raise CommandExecutionHalted(proposal=prop, halt_message=halt_msg)
 
         res = await self.shell.execute_in_guest(node, vmid, command, timeout=20)
         return {
@@ -605,10 +586,19 @@ class LLMAgent:
             )
 
             # Execute tool calls, truncate if excessive, and append results
+            halted_exception: Optional[CommandExecutionHalted] = None
             for call in response.tool_calls:
-                raw_result = self._execute_tool(call.name, call.arguments)
-                if asyncio.iscoroutine(raw_result):
-                    raw_result = await raw_result
+                try:
+                    raw_result = self._execute_tool(call.name, call.arguments)
+                    if asyncio.iscoroutine(raw_result):
+                        raw_result = await raw_result
+                except CommandExecutionHalted as e:
+                    halted_exception = e
+                    break
+                except Exception as e:
+                    logger.exception("Error executing tool '%s': %s", call.name, e)
+                    raw_result = {"error": str(e)}
+
                 tool_result = self._truncate_tool_result(raw_result)
                 messages.append(
                     LLMMessage(
@@ -618,6 +608,22 @@ class LLMAgent:
                         content=tool_result,
                     )
                 )
+
+            if halted_exception:
+                logger.info(
+                    "Halting reasoning loop awaiting user approval for proposal %s on %s",
+                    halted_exception.proposal.id,
+                    halted_exception.proposal.target,
+                )
+                self.usage.record_usage(
+                    model=self.model_name,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    context=f"chat:halted:{halted_exception.proposal.id}",
+                )
+                final_text = halted_exception.halt_message
+                self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
+                return final_text
 
             iterations += 1
 

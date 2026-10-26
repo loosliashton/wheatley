@@ -145,3 +145,16 @@ def test_list_and_revoke_rules(store):
 
     # Revoke non-existent rule
     assert store.revoke_user_rule(9999) is False
+
+
+def test_get_active_proposals(store):
+    p1 = store.create_proposal("ALLOWLIST_RULE", "cave", "smartctl --scan", "Scan disks", expires_minutes=15)
+    p2 = store.create_proposal("ALLOWLIST_RULE", "cave", "pvesm status", "Storage status", expires_minutes=-5)
+
+    active = store.get_active_proposals()
+    assert len(active) == 1
+    assert active[0].id == p1.id
+
+    # Resolve p1
+    store.resolve_proposal(p1.id, "ALLOW_ONCE", user_id=123)
+    assert len(store.get_active_proposals()) == 0

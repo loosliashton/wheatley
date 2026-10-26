@@ -208,6 +208,36 @@ class ApprovalStore:
                 execution_result=row["execution_result"],
             )
 
+    def get_active_proposals(self) -> List[Proposal]:
+        """Fetch all currently pending and unexpired proposals."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM proposals WHERE status = 'PENDING' AND expires_at > ? ORDER BY created_at DESC",
+                (now,),
+            )
+            props = []
+            for row in cur.fetchall():
+                props.append(
+                    Proposal(
+                        id=row["id"],
+                        hash=row["hash"] if "hash" in row.keys() else None,
+                        proposal_type=row["proposal_type"],
+                        target=row["target"],
+                        command=row["command"],
+                        pattern=row["pattern"],
+                        summary=row["summary"],
+                        risk=row["risk"],
+                        status=row["status"],
+                        created_at=datetime.fromisoformat(row["created_at"]),
+                        expires_at=datetime.fromisoformat(row["expires_at"]),
+                        executed_at=datetime.fromisoformat(row["executed_at"]) if row["executed_at"] else None,
+                        execution_result=row["execution_result"],
+                    )
+                )
+            return props
+
     def resolve_proposal(
         self,
         proposal_id: str,

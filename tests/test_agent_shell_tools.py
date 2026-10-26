@@ -5,7 +5,7 @@ import pytest
 
 from wheatley.audit import AuditLogger
 from wheatley.config import NodeConfig, NodeSshConfig, NodeTokensConfig, WheatleyConfig
-from wheatley.llm.agent import LLMAgent
+from wheatley.llm.agent import LLMAgent, CommandExecutionHalted
 from wheatley.tools.shell import ShellResult
 
 
@@ -46,11 +46,11 @@ async def test_run_host_command_allowlisted(mock_agent):
 async def test_run_host_command_blocked_produces_proposal(mock_agent):
     mock_agent.shell.execute_on_host = AsyncMock()
 
-    result = await mock_agent._tool_run_host_command("cave", "reboot")
-    assert result["status"] == "REQUIRES_APPROVAL"
-    assert "proposal" in result
-    assert result["proposal"]["target"] == "cave"
-    assert result["proposal"]["command"] == "reboot"
+    with pytest.raises(CommandExecutionHalted) as excinfo:
+        await mock_agent._tool_run_host_command("cave", "reboot")
+    prop = excinfo.value.proposal
+    assert prop.target == "cave"
+    assert prop.command == "reboot"
     # Shell execute should NEVER have been called!
     mock_agent.shell.execute_on_host.assert_not_called()
 
@@ -73,10 +73,10 @@ async def test_run_guest_command_allowlisted(mock_agent):
 async def test_run_guest_command_blocked_produces_proposal(mock_agent):
     mock_agent.shell.execute_in_guest = AsyncMock()
 
-    result = await mock_agent._tool_run_guest_command("cave", 100, "docker rm -f plex")
-    assert result["status"] == "REQUIRES_APPROVAL"
-    assert "proposal" in result
-    assert result["proposal"]["target"] == "cave/100"
+    with pytest.raises(CommandExecutionHalted) as excinfo:
+        await mock_agent._tool_run_guest_command("cave", 100, "docker rm -f plex")
+    prop = excinfo.value.proposal
+    assert prop.target == "cave/100"
     mock_agent.shell.execute_in_guest.assert_not_called()
 
 
@@ -89,9 +89,9 @@ async def test_dynamic_target_allowlist_permits_command(mock_agent):
     )
 
     # 1. First attempt on cave/101 is blocked because snapraid is not in DEFAULT_ALLOWLIST
-    res1 = await mock_agent._tool_run_guest_command("cave", 101, "snapraid status")
-    assert res1["status"] == "REQUIRES_APPROVAL"
-    prop_id = res1["proposal_id"]
+    with pytest.raises(CommandExecutionHalted) as excinfo:
+        await mock_agent._tool_run_guest_command("cave", 101, "snapraid status")
+    prop_id = excinfo.value.proposal.id
 
     # 2. User approves with ALLOW_ALWAYS on cave/101
     ok, msg = mock_agent.approvals.resolve_proposal(prop_id, "ALLOW_ALWAYS", user_id=123)
@@ -103,8 +103,32 @@ async def test_dynamic_target_allowlist_permits_command(mock_agent):
     assert res2["stdout"] == "Everything OK"
 
     # 4. Same command on cave/102 is still blocked (target scoped)
-    res3 = await mock_agent._tool_run_guest_command("cave", 102, "snapraid status")
-    assert res3["status"] == "REQUIRES_APPROVAL"
+    with pytest.raises(CommandExecutionHalted):
+        await mock_agent._tool_run_guest_command("cave", 102, "snapraid status")
+
+
+@pytest.mark.asyncio
+async def test_chat_halts_on_unallowed_command(mock_agent):
+    from wheatley.llm.base import BaseLLMProvider, LLMResponse, ToolCall
+
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.model_name = "mock"
+    mock_provider.provider_name = "mock"
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="run_guest_command", arguments={"node": "cave", "vmid": 101, "command": "snapraid status"})],
+            input_tokens=50,
+            output_tokens=20,
+        )
+    )
+    mock_agent.provider = mock_provider
+
+    response = await mock_agent.chat("Check snapraid", chat_id="t1")
+    assert "I need permission to execute `snapraid status` on `cave/101`" in response
+    active_props = mock_agent.approvals.get_active_proposals()
+    assert any(p.command == "snapraid status" for p in active_props)
 
 
 @pytest.mark.asyncio

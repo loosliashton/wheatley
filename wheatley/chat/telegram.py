@@ -533,7 +533,10 @@ class TelegramBot(ChatInterface):
         query = update.callback_query
         if not query or not self._is_authorized(update):
             return
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.debug("Failed to answer callback query: %s", e)
 
         data = query.data or ""
         user_id = update.effective_user.id
@@ -553,19 +556,27 @@ class TelegramBot(ChatInterface):
             async with TypingIndicator(query.message.chat if query.message else None):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
-            await self._send_or_reply(res, target=query.message)
 
+            agent_resumed = False
             # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
             if self.agent and getattr(self.agent, "is_configured", False) and prop:
                 chat_id = str(query.message.chat_id) if query.message else "default"
                 continuation = (
                     f"Command '{prop.command}' on target '{prop.target}' was executed.\n"
                     f"Execution output:\n{res}\n\n"
-                    "Please analyze this output and answer my previous question."
+                    "Synthesize your final answer directly for the user using this output. "
+                    "Do not run additional diagnostic commands unless strictly necessary."
                 )
-                async with TypingIndicator(query.message.chat if query.message else None):
-                    followup = await self.agent.chat(continuation, chat_id=chat_id)
-                await self._send_or_reply(followup, target=query.message)
+                try:
+                    async with TypingIndicator(query.message.chat if query.message else None):
+                        followup = await self.agent.chat(continuation, chat_id=chat_id)
+                    await self._send_or_reply(followup, target=query.message)
+                    agent_resumed = True
+                except Exception as e:
+                    logger.exception("Agent failed to synthesize proposal continuation: %s", e)
+
+            if not agent_resumed:
+                await self._send_or_reply(res, target=query.message)
 
         elif data.startswith("allow_always:"):
             proposal_id = data.split(":", 1)[1]
@@ -584,19 +595,27 @@ class TelegramBot(ChatInterface):
             async with TypingIndicator(query.message.chat if query.message else None):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
-            await self._send_or_reply(res, target=query.message)
 
+            agent_resumed = False
             # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
             if self.agent and getattr(self.agent, "is_configured", False) and prop:
                 chat_id = str(query.message.chat_id) if query.message else "default"
                 continuation = (
                     f"Command '{prop.command}' on target '{prop.target}' was permanently allowed and executed.\n"
                     f"Execution output:\n{res}\n\n"
-                    "Please analyze this output and answer my previous question."
+                    "Synthesize your final answer directly for the user using this output. "
+                    "Do not run additional diagnostic commands unless strictly necessary."
                 )
-                async with TypingIndicator(query.message.chat if query.message else None):
-                    followup = await self.agent.chat(continuation, chat_id=chat_id)
-                await self._send_or_reply(followup, target=query.message)
+                try:
+                    async with TypingIndicator(query.message.chat if query.message else None):
+                        followup = await self.agent.chat(continuation, chat_id=chat_id)
+                    await self._send_or_reply(followup, target=query.message)
+                    agent_resumed = True
+                except Exception as e:
+                    logger.exception("Agent failed to synthesize proposal continuation: %s", e)
+
+            if not agent_resumed:
+                await self._send_or_reply(res, target=query.message)
 
         elif data.startswith("approve:"):
             proposal_id = data.split(":", 1)[1]
@@ -614,18 +633,25 @@ class TelegramBot(ChatInterface):
                 async with TypingIndicator(query.message.chat if query.message else None):
                     res = await self._execute_proposal_command(prop)
                 self.approvals.record_execution(proposal_id, res[:500])
-                await self._send_or_reply(res, target=query.message)
 
+                agent_resumed = False
                 if self.agent and getattr(self.agent, "is_configured", False):
                     chat_id = str(query.message.chat_id) if query.message else "default"
                     continuation = (
                         f"Action command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
                         f"Execution output:\n{res}\n\n"
-                        "Please confirm the result to the user."
+                        "Please confirm the result concisely to the user."
                     )
-                    async with TypingIndicator(query.message.chat if query.message else None):
-                        followup = await self.agent.chat(continuation, chat_id=chat_id)
-                    await self._send_or_reply(followup, target=query.message)
+                    try:
+                        async with TypingIndicator(query.message.chat if query.message else None):
+                            followup = await self.agent.chat(continuation, chat_id=chat_id)
+                        await self._send_or_reply(followup, target=query.message)
+                        agent_resumed = True
+                    except Exception as e:
+                        logger.exception("Agent failed to synthesize proposal continuation: %s", e)
+
+                if not agent_resumed:
+                    await self._send_or_reply(res, target=query.message)
 
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, True, user_id)

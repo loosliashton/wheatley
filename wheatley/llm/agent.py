@@ -15,7 +15,9 @@ from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinit
 from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker
+from wheatley.tools.allowlist import is_command_allowed
 from wheatley.tools.proxmox import ProxmoxClient
+from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.llm.agent")
 
@@ -31,12 +33,14 @@ class LLMAgent:
         usage: Optional[UsageTracker] = None,
         check_engine: Optional[CheckEngine] = None,
         proxmox_clients: Optional[Dict[str, ProxmoxClient]] = None,
+        shell: Optional[ShellExecutor] = None,
         **kwargs: Any,  # Absorb legacy kwargs like budget=...
     ):
         self.config = config
         self.audit = audit
         self.check_engine = check_engine
         self.clients = proxmox_clients or {}
+        self.shell = shell or (check_engine.shell if check_engine else ShellExecutor(self.config))
 
         # Conversation Memory (SQLite-backed)
         self.memory = kwargs.get("memory") or ConversationStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
@@ -116,6 +120,40 @@ class LLMAgent:
                 },
             ),
             ToolDefinition(
+                name="run_host_command",
+                description=(
+                    "Execute a read-only diagnostics command directly on a Proxmox host node (e.g. 'cave'). "
+                    "Permitted commands include: uptime, free -m, df -h, journalctl -n 20, systemctl status <unit>, "
+                    "pvesm status, smartctl -H <device>, sensors -j, zpool status, etc. "
+                    "Any non-allowlisted or mutating command is blocked and automatically converted to an action proposal."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "node": {"type": "string", "description": "Target Proxmox node name (e.g. cave, doug)"},
+                        "command": {"type": "string", "description": "Shell command to execute on the host"},
+                    },
+                    "required": ["node", "command"],
+                },
+            ),
+            ToolDefinition(
+                name="run_guest_command",
+                description=(
+                    "Execute a read-only diagnostics command inside a Proxmox LXC container or QEMU VM. "
+                    "Permitted commands include: uptime, free, df, docker ps, docker logs <container>, systemctl status <unit>, etc. "
+                    "Any non-allowlisted or mutating command is blocked and automatically converted to an action proposal."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "node": {"type": "string", "description": "Host node where the guest resides (e.g. cave)"},
+                        "vmid": {"type": "integer", "description": "Virtual Machine or Container ID (e.g. 100, 102)"},
+                        "command": {"type": "string", "description": "Shell command to execute inside the guest"},
+                    },
+                    "required": ["node", "vmid", "command"],
+                },
+            ),
+            ToolDefinition(
                 name="propose_action",
                 description="Submit an action proposal for user approval before executing any mutating command (start, stop, restart, config change).",
                 parameters={
@@ -166,10 +204,11 @@ class LLMAgent:
             "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call the 'propose_action' function so the user can review and approve it via Telegram buttons.",
             "3. Telegram Mobile Formatting: Homelab administrators read your messages on Telegram mobile screens. Format your answers cleanly: use bullet points (•) for lists, **bold** for key names and metrics, and triple-backtick code blocks for CLI commands. Avoid markdown tables (they do not render well on mobile; format tabular data as bullet lists instead).",
             "4. Grounded in Facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
+            "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. docker ps, docker logs, uptime, free, df, systemctl status, journalctl, sensors, smartctl). Non-allowlisted or state-changing commands will automatically produce an interactive approval proposal.",
         ]
         return "\n".join(lines)
 
-    def _execute_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_tool(self, name: str, args: Dict[str, Any]) -> Any:
         """Dispatch a function call requested by the model to the appropriate local handler."""
         logger.info("Executing tool '%s' with args %s", name, args)
         try:
@@ -181,6 +220,12 @@ class LLMAgent:
                 return self._tool_get_check_states()
             elif name == "run_health_check":
                 return self._tool_run_health_check(args.get("check_id", ""))
+            elif name == "run_host_command":
+                return self._tool_run_host_command(args.get("node", ""), args.get("command", ""))
+            elif name == "run_guest_command":
+                return self._tool_run_guest_command(
+                    args.get("node", ""), int(args.get("vmid", 0)), args.get("command", "")
+                )
             elif name == "get_recent_audit_logs":
                 return self._tool_get_audit_logs(int(args.get("limit", 10)))
             elif name == "propose_action":
@@ -252,28 +297,74 @@ class LLMAgent:
             })
         return {"checks": summary}
 
-    def _tool_run_health_check(self, check_id: str) -> Dict[str, Any]:
+    async def _tool_run_health_check(self, check_id: str) -> Dict[str, Any]:
         if not self.check_engine:
             return {"error": "Check engine not active"}
         if check_id not in self.check_engine.checks:
             return {"error": f"Check '{check_id}' not found"}
 
-        # Run synchronously in thread if called from sync context or await if in async
-        try:
-            loop = asyncio.get_running_loop()
-            # If inside running loop, we can schedule execution
-            res = asyncio.run_coroutine_threadsafe(
-                self.check_engine.execute_check(check_id), loop
-            ).result(timeout=30)
-        except RuntimeError:
-            res = asyncio.run(self.check_engine.execute_check(check_id))
-
+        res = await self.check_engine.execute_check(check_id)
         return {
             "check_id": res.check_id,
             "status": res.status.value,
             "summary": res.summary,
             "metrics": res.metrics,
             "details": res.details,
+        }
+
+    async def _tool_run_host_command(self, node: str, command: str) -> Dict[str, Any]:
+        allowed, reason = is_command_allowed(command, self.config.allowlist)
+        if not allowed:
+            logger.info("Host command '%s' on %s blocked by allowlist (%s); proposing action", command, node, reason)
+            proposal = self._tool_propose_action(
+                target=node,
+                command=command,
+                summary=f"Run command on host {node}: {command}",
+                risk="HIGH" if any(w in command for w in ("rm", "dd", "mkfs", "reboot", "shutdown")) else "MEDIUM",
+            )
+            return {
+                "status": "REQUIRES_APPROVAL",
+                "message": f"Command '{command}' is not in the read-only allowlist ({reason}). An interactive approval proposal has been created.",
+                "proposal": proposal,
+            }
+
+        res = await self.shell.execute_on_host(node, command, timeout=20)
+        return {
+            "status": "SUCCESS" if res.success else "FAILED",
+            "node": node,
+            "command": command,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "timed_out": res.timed_out,
+        }
+
+    async def _tool_run_guest_command(self, node: str, vmid: int, command: str) -> Dict[str, Any]:
+        allowed, reason = is_command_allowed(command, self.config.allowlist)
+        target = f"{node}/{vmid}"
+        if not allowed:
+            logger.info("Guest command '%s' on %s blocked by allowlist (%s); proposing action", command, target, reason)
+            proposal = self._tool_propose_action(
+                target=target,
+                command=command,
+                summary=f"Run command on guest {target}: {command}",
+                risk="HIGH" if any(w in command for w in ("rm", "dd", "mkfs", "reboot", "shutdown")) else "MEDIUM",
+            )
+            return {
+                "status": "REQUIRES_APPROVAL",
+                "message": f"Command '{command}' is not in the read-only allowlist ({reason}). An interactive approval proposal has been created.",
+                "proposal": proposal,
+            }
+
+        res = await self.shell.execute_in_guest(node, vmid, command, timeout=20)
+        return {
+            "status": "SUCCESS" if res.success else "FAILED",
+            "target": target,
+            "command": command,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "timed_out": res.timed_out,
         }
 
     def _tool_get_audit_logs(self, limit: int = 10) -> Dict[str, Any]:
@@ -423,6 +514,8 @@ class LLMAgent:
             # Execute tool calls, truncate if excessive, and append results
             for call in response.tool_calls:
                 raw_result = self._execute_tool(call.name, call.arguments)
+                if asyncio.iscoroutine(raw_result):
+                    raw_result = await raw_result
                 tool_result = self._truncate_tool_result(raw_result)
                 messages.append(
                     LLMMessage(

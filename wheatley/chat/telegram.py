@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -26,6 +27,45 @@ from wheatley.chat.formatter import (
 from wheatley.config import TelegramConfig
 
 logger = logging.getLogger("wheatley.chat.telegram")
+
+
+class TypingIndicator:
+    """Async context manager that continuously emits Telegram 'typing' actions every 4s.
+
+    Telegram's sendChatAction('typing') expires automatically after 5 seconds.
+    This keeps the typing indicator active for long-running reasoning loops and commands.
+    """
+
+    def __init__(self, chat: Optional[Any], interval: float = 4.0):
+        self.chat = chat
+        self.interval = interval
+        self._stop = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+    async def __aenter__(self) -> "TypingIndicator":
+        if self.chat and hasattr(self.chat, "send_action"):
+            self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._task:
+            self._stop.set()
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.chat.send_action("typing")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval)
+            except asyncio.TimeoutError:
+                pass
 
 
 class TelegramBot(ChatInterface):
@@ -230,7 +270,8 @@ class TelegramBot(ChatInterface):
         )
         if self.discovery_provider:
             try:
-                summary = await self.discovery_provider()
+                async with TypingIndicator(update.effective_chat):
+                    summary = await self.discovery_provider()
                 await self._send_or_reply(summary, target=update.message)
             except Exception as e:
                 logger.exception("Telegram /discover failed")
@@ -398,11 +439,12 @@ class TelegramBot(ChatInterface):
             f"🔍 *Investigating `{check_id}` with {model_name}...*",
             target=update.message,
         )
-        diagnosis = await self.agent.investigate_alert(
-            check_id=check_id,
-            issue_summary=f"Manual investigation triggered for {check_id}",
-            chat_id=chat_id,
-        )
+        async with TypingIndicator(update.effective_chat):
+            diagnosis = await self.agent.investigate_alert(
+                check_id=check_id,
+                issue_summary=f"Manual investigation triggered for {check_id}",
+                chat_id=chat_id,
+            )
         await self._send_or_reply(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", target=update.message)
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -453,11 +495,12 @@ class TelegramBot(ChatInterface):
                     f"🔍 *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
                     target=query.message,
                 )
-                diagnosis = await self.agent.investigate_alert(
-                    check_id=check_id,
-                    issue_summary=f"Alert investigation requested for {check_id}",
-                    chat_id=chat_id,
-                )
+                async with TypingIndicator(query.message.chat if query.message else None):
+                    diagnosis = await self.agent.investigate_alert(
+                        check_id=check_id,
+                        issue_summary=f"Alert investigation requested for {check_id}",
+                        chat_id=chat_id,
+                    )
                 await self._send_or_reply(
                     f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
                     target=query.message,
@@ -475,13 +518,9 @@ class TelegramBot(ChatInterface):
         self.audit.log_event("CHAT", f"tg:{update.effective_user.id}", "user_message", "RECEIVED", details={"text": text[:100]})
 
         if self.agent and self.agent.is_configured:
-            try:
-                await update.message.chat.send_action("typing")
-            except Exception:
-                pass
-
             chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
-            response = await self.agent.chat(text, chat_id=chat_id)
+            async with TypingIndicator(update.effective_chat):
+                response = await self.agent.chat(text, chat_id=chat_id)
             await self._send_or_reply(response, target=update.message)
         else:
             await self._send_or_reply(

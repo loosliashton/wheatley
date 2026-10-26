@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Wheatley Restricted Shell Wrapper
+# Installed on Proxmox VE hosts to restrict the 'wheatley' SSH system user.
+# Disallows interactive login; only permits non-interactive command execution.
+# ==============================================================================
+set -euo pipefail
+
+CMD=""
+if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+  CMD="$SSH_ORIGINAL_COMMAND"
+elif [[ $# -ge 2 && "$1" == "-c" ]]; then
+  CMD="$2"
+fi
+
+if [[ -z "$CMD" ]]; then
+  echo "Wheatley shell: interactive shell sessions are disabled." >&2
+  exit 1
+fi
+
+# Execute the requested non-interactive command
+exec /bin/bash -c "$CMD"

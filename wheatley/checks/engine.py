@@ -20,6 +20,7 @@ from wheatley.checks.base import (
 import wheatley.checks.builtin  # noqa: F401 - ensure built-ins are registered
 from wheatley.config import WheatleyConfig
 from wheatley.tools.proxmox import ProxmoxClient
+from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.checks.engine")
 
@@ -48,6 +49,7 @@ class CheckEngine:
         config: WheatleyConfig,
         audit: AuditLogger,
         alert_sink: Optional[Callable[[str, Optional[Dict[str, Any]]], Coroutine[Any, Any, None]]] = None,
+        shell: Optional[ShellExecutor] = None,
     ):
         self.config = config
         self.audit = audit
@@ -58,6 +60,9 @@ class CheckEngine:
         self.last_run_at: Optional[datetime] = None
         self.started_at: Optional[datetime] = None
 
+        # Initialize Shell executor
+        self.shell = shell or ShellExecutor(config)
+
         # Initialize Proxmox clients and context
         self.clients: Dict[str, ProxmoxClient] = {}
         for node_cfg in config.nodes:
@@ -67,7 +72,7 @@ class CheckEngine:
                 except Exception as e:
                     logger.warning("Could not create Proxmox client for %s: %s", node_cfg.name, e)
 
-        self.context = CheckContext(config, self.clients)
+        self.context = CheckContext(config, self.clients, shell=self.shell)
         self._initialize_checks()
 
     def _initialize_checks(self) -> None:
@@ -241,7 +246,16 @@ class CheckEngine:
         }
 
     def stop(self) -> None:
-        """Stop the check engine scheduler."""
+        """Stop the check engine scheduler and close shell connections."""
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("Check engine scheduler stopped.")
+        if hasattr(self, "shell") and self.shell:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.shell.close())
+                else:
+                    loop.run_until_complete(self.shell.close())
+            except Exception:
+                pass

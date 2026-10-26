@@ -109,3 +109,28 @@ def test_split_telegram_message():
     assert len(chunks) >= 3
     for chunk in chunks:
         assert len(chunk) <= 100
+
+
+@pytest.mark.asyncio
+async def test_typing_indicator_repeats():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from wheatley.chat.telegram import TypingIndicator
+
+    mock_chat = MagicMock()
+    mock_chat.send_action = AsyncMock()
+
+    async with TypingIndicator(mock_chat, interval=0.05):
+        await asyncio.sleep(0.12)
+
+    assert mock_chat.send_action.call_count >= 2
+    mock_chat.send_action.assert_called_with("typing")
+
+
+@pytest.mark.asyncio
+async def test_typing_indicator_handles_none_chat():
+    import asyncio
+    from wheatley.chat.telegram import TypingIndicator
+
+    async with TypingIndicator(None):
+        await asyncio.sleep(0.01)

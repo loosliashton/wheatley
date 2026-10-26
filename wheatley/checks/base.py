@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from wheatley.config import CheckConfig, WheatleyConfig
 from wheatley.tools.proxmox import ProxmoxClient
+from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.checks.base")
 
@@ -37,11 +38,17 @@ class CheckResult(BaseModel):
 
 
 class CheckContext:
-    """Runtime context providing access to Proxmox clients and IP resolution."""
+    """Runtime context providing access to Proxmox clients, shell executor, and IP resolution."""
 
-    def __init__(self, config: WheatleyConfig, proxmox_clients: Dict[str, ProxmoxClient]):
+    def __init__(
+        self,
+        config: WheatleyConfig,
+        proxmox_clients: Dict[str, ProxmoxClient],
+        shell: Optional[ShellExecutor] = None,
+    ):
         self.config = config
         self.clients = proxmox_clients
+        self.shell = shell
         self._ip_cache: Dict[str, str] = {}
 
     def get_client(self, node_name: str) -> Optional[ProxmoxClient]:
@@ -101,11 +108,17 @@ class CheckContext:
 class BaseCheck(ABC):
     """Abstract base class for all Wheatley check types."""
 
-    def __init__(self, config: CheckConfig):
-        self.config = config
-        self.id = config.id
-        self.type = config.type
-        self.params = config.params or {}
+    def __init__(self, config: Optional[CheckConfig] = None, **kwargs: Any):
+        if config is not None:
+            self.config = config
+            self.id = config.id
+            self.type = config.type
+            self.params = config.params or {}
+        else:
+            self.id = kwargs.get("id", "check")
+            self.type = kwargs.get("type", "generic")
+            self.params = kwargs.get("params", {})
+            self.config = CheckConfig(id=self.id, type=self.type, params=self.params)
 
     @abstractmethod
     async def run(self, context: CheckContext) -> CheckResult:

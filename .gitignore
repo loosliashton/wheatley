@@ -5,7 +5,7 @@
 # Secrets and environment configurations
 *.env
 .env*
-!.env.example
+!secrets.example.env
 secrets.env
 *.key
 *.pem

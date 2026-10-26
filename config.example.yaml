@@ -85,94 +85,19 @@ health:
   push_interval_seconds: 60
   push_method: GET                   # GET, or POST (sends the health report as JSON)
 
-# Monitored Checks
-# You can define checks directly here, OR separate them into /etc/wheatley/checks.yaml
-# (recommended). Separating checks keeps cluster credentials and nodes isolated and allows
-# Wheatley to safely propose and apply threshold or exclusion changes with your approval.
-# If checks_file is set (or checks.yaml exists alongside config.yaml), it is loaded automatically.
-# checks_file: "/etc/wheatley/checks.yaml"
-
-checks:
-  # Cluster & Node Health
-  - id: node-health
-    type: node_metrics
-    enabled: true
-    interval_seconds: 60
-    params:
-      nodes: "*"
-      cpu_crit_percent: 90
-      mem_crit_percent: 90
-      duration_minutes: 5
-
-  # Storage Pools
-  - id: storage-health
-    type: storage
-    enabled: true
-    interval_seconds: 120
-    params:
-      nodes: "*"
-      warn_percent: 85
-      crit_percent: 95
-
-  # Guest states (auto-detects all onboot guests)
-  - id: guests-up
-    type: guest_state
-    enabled: true
-    interval_seconds: 60
-    params:
-      select:
-        onboot: true
-      exclude: []
-
-  # Service Health Checks (examples)
-  - id: plex
-    type: http
-    enabled: true
-    interval_seconds: 60
-    params:
-      url: "http://{guest:pve-node-01/102}:32400/identity"
-
-  - id: frigate
-    type: http
-    enabled: true
-    interval_seconds: 60
-    params:
-      url: "http://{guest:pve-node-01/107}:5000/api/version"
-
-  - id: crafty
-    type: http
-    enabled: true
-    interval_seconds: 60
-    params:
-      url: "https://{guest:pve-node-01/108}:8443/"
-      tls_verify: false
-
-  - id: omv
-    type: http
-    enabled: true
-    interval_seconds: 60
-    params:
-      url: "http://{guest:pve-node-01/101}/"
-
-  - id: home-assistant
-    type: http
-    enabled: true
-    interval_seconds: 60
-    params:
-      url: "http://{guest:pve-node-02/100}:8123/manifest.json"
-
-  # Docker containers on Docker host VM
-  - id: docker-containers
-    type: docker
-    enabled: true
-    interval_seconds: 60
-    params:
-      guest: "pve-node-01/100"
-      containers: "*"
-      alert_on:
-        - exited
-        - unhealthy
-        - restarting
+# ------------------------------------------------------------------------------
+# Monitored Checks File (Mandatory Separation)
+# ------------------------------------------------------------------------------
+# Health checks MUST be configured in a separate file (e.g. /etc/wheatley/checks.yaml).
+# Inline 'checks:' inside config.yaml is not allowed.
+#
+# Keeping checks in checks.yaml isolates your cluster topology and secrets from
+# routine check maintenance, and allows Wheatley to safely propose and apply
+# threshold or exclusion updates (such as ignoring dormant Docker containers)
+# after interactive confirmation in Telegram without modifying config.yaml.
+#
+# See checks.example.yaml for the complete schema and check definitions.
+checks_file: "/etc/wheatley/checks.yaml"
 
 # Commands permitted to run immediately without interactive approval
 allowlist:

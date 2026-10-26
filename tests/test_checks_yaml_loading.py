@@ -217,3 +217,38 @@ async def test_telegram_approves_config_update(tmp_path: Path):
     # 3. Verify agent continuation message sent
     mock_agent.chat.assert_called_once()
     assert "Configuration update" in mock_agent.chat.call_args[0][0]
+
+
+def test_inline_checks_in_config_yaml_disallowed(tmp_path: Path):
+    """Verify that defining checks inline in config.yaml raises ValueError."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+chat:
+  telegram:
+    bot_token: "123:ABC"
+    allowed_user_ids: [12345]
+checks:
+  - id: ping
+    type: http
+    params:
+      url: "http://127.0.0.1"
+""", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Defining 'checks' directly inside config.yaml is not allowed"):
+        load_config(cfg_file)
+
+
+def test_missing_configured_checks_file_raises_error(tmp_path: Path):
+    """Verify that specifying a non-existent checks_file raises FileNotFoundError."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("""
+chat:
+  telegram:
+    bot_token: "123:ABC"
+    allowed_user_ids: [12345]
+checks_file: "/nonexistent/checks.yaml"
+""", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="Configured checks_file not found"):
+        load_config(cfg_file)
+

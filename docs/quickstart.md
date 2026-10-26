@@ -21,7 +21,7 @@ This guide walks you through setting up Wheatley from scratch on your Proxmox VE
 Clone Wheatley onto your primary Proxmox VE host:
 
 ```bash
-git clone https://github.com/your-username/wheatley.git /root/wheatley
+git clone https://github.com/loosliashton/wheatley.git /root/wheatley
 cd /root/wheatley
 ```
 
@@ -58,7 +58,7 @@ Inside CT 110 (or via `pct enter 110`):
 
 1. **Secrets (`/etc/wheatley/secrets.env`):**
    ```bash
-   cp /opt/wheatley/.env.example /etc/wheatley/secrets.env
+   cp /opt/wheatley/secrets.example.env /etc/wheatley/secrets.env
    chmod 600 /etc/wheatley/secrets.env
    chown wheatley:wheatley /etc/wheatley/secrets.env
    nano /etc/wheatley/secrets.env
@@ -72,7 +72,7 @@ Inside CT 110 (or via `pct enter 110`):
    ```
 
 3. **Checks Configuration (`/etc/wheatley/checks.yaml`):**
-   Separating checks isolates cluster nodes and API tokens from check thresholds, and allows Wheatley to conversationally propose and apply updates (e.g. ignoring dormant containers):
+   Checks must be defined in a separate `checks.yaml` file (enforced by the configuration loader). This isolates cluster nodes and API tokens from check thresholds, and allows Wheatley to conversationally propose and apply updates (e.g. ignoring dormant containers):
    ```bash
    cp /opt/wheatley/checks.example.yaml /etc/wheatley/checks.yaml
    nano /etc/wheatley/checks.yaml

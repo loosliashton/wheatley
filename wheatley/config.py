@@ -72,6 +72,14 @@ class LLMConfig(BaseModel):
     )
     max_tool_result_chars: int = Field(4000, description="Max characters for a single tool result before truncation")
 
+    @model_validator(mode="before")
+    @classmethod
+    def alias_base_url(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "base_url" in data and "api_base" not in data:
+                data["api_base"] = data.pop("base_url")
+        return data
+
 
 class BudgetConfig(BaseModel):
     """Deprecated: Legacy budget config retained for backwards compatibility."""
@@ -230,13 +238,28 @@ def load_config(config_path: str | Path, secrets_path: Optional[str | Path] = No
     if not isinstance(data, dict):
         raise ValueError("Config YAML must be a mapping")
 
-    # Load separate checks.yaml if specified or if checks.yaml exists alongside config_path
-    checks_file_spec = data.get("checks_file")
+    # Enforce separate checks file: checks must NOT be defined directly in config.yaml
+    if "checks" in data and data["checks"]:
+        raise ValueError(
+            "Defining 'checks' directly inside config.yaml is not allowed. "
+            "Please place your checks in a separate checks configuration file "
+            "(e.g. /etc/wheatley/checks.yaml) and configure 'checks_file' "
+            "or place 'checks.yaml' alongside your config file."
+        )
+
+    # Load separate checks.yaml if specified (or via CHECKS_FILE env var), or alongside config_path
+    checks_file_spec = (
+        data.get("checks_file")
+        or os.environ.get("CHECKS_FILE")
+        or os.environ.get("WHEATLEY_CHECKS_FILE")
+    )
     resolved_checks_file: Optional[Path] = None
     if checks_file_spec:
         p = Path(checks_file_spec)
         if not p.is_absolute():
             p = cfg_file.parent / p
+        if not p.is_file():
+            raise FileNotFoundError(f"Configured checks_file not found: {p}")
         resolved_checks_file = p
     elif (cfg_file.parent / "checks.yaml").is_file():
         resolved_checks_file = cfg_file.parent / "checks.yaml"

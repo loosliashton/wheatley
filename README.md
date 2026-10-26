@@ -1,11 +1,11 @@
-# 🤖 Wheatley
+# Wheatley
 
 > **AI Homelab Administration & Monitoring Agent for Proxmox VE**  
 > Proactive monitoring, Telegram alerts, and AI-assisted troubleshooting with an **enforced interactive approval gate** for all state changes.
 
 ---
 
-## 🌟 Overview
+## Overview
 
 Wheatley is an autonomous administration agent purpose-built for homelab operators running Proxmox VE. Unlike traditional monitoring dashboards or unconstrained AI tools, Wheatley is built around a **strict safety model**:
 
@@ -17,7 +17,7 @@ Wheatley is an autonomous administration agent purpose-built for homelab operato
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -40,7 +40,7 @@ flowchart TD
 
 ---
 
-## 🚀 Quick Start & Installation
+## Quick Start & Installation
 
 ### Prerequisites
 1. **Proxmox VE Host** (PVE 8.x or 9.x) with root access.
@@ -53,7 +53,7 @@ flowchart TD
 ### Step 1: Clone Repository onto Proxmox Host
 SSH into your primary Proxmox host and clone the repository:
 ```bash
-git clone https://github.com/your-username/wheatley.git /root/wheatley
+git clone https://github.com/loosliashton/wheatley.git /root/wheatley
 cd /root/wheatley
 ```
 
@@ -78,7 +78,7 @@ This script:
 ### Step 4: Populate Secrets
 Inside CT 110 (or via `pct enter <ctid>`), create `/etc/wheatley/secrets.env`:
 ```bash
-cp .env.example /etc/wheatley/secrets.env
+cp secrets.example.env /etc/wheatley/secrets.env
 chmod 600 /etc/wheatley/secrets.env
 chown wheatley:wheatley /etc/wheatley/secrets.env
 nano /etc/wheatley/secrets.env
@@ -111,7 +111,7 @@ systemctl enable --now wheatley
 
 ---
 
-## 🛠️ CLI & Telegram Usage
+## CLI & Telegram Usage
 
 ### CLI Commands
 Available both inside the LXC container and from the Proxmox host via the convenience wrapper:
@@ -164,7 +164,7 @@ From your authorized Telegram chat:
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 Detailed guides are available in the [`docs/`](docs/) directory:
 
@@ -173,54 +173,6 @@ Detailed guides are available in the [`docs/`](docs/) directory:
 - [🛡️ Security & Safety Model](docs/security.md) — Unprivileged LXC, allowlists, and the interactive approval gate.
 - [🤖 LLM Provider Setup](docs/llm_providers.md) — Configuration for Gemini, Ollama, OpenAI, Groq, and vLLM.
 
----
+## License
 
-## 🗺️ Project Roadmap
-
-- [x] **Phase 1: Foundation**
-  - Unprivileged Debian 13 LXC provisioning script (`install/create-lxc.sh`).
-  - Configuration loader with Pydantic schema and `${ENV_VAR}` interpolation.
-  - SQLite audit logger (`audit_log`, `proposals`, `budget_usage`, `credit_ledger`).
-  - Telegram bot adapter with user whitelisting and single-instance atomic file lock.
-  - Systemd service daemon.
-- [x] **Phase 2: Multi-Node Access & Auto-Discovery**
-  - Host security provisioning script (`install/host-setup.sh`).
-  - PVE REST API client wrapper with TLS certificate pinning.
-  - Live multi-node status aggregation (`/status`).
-  - Service fingerprint database (`wheatley/discovery/services.yaml`).
-  - Automated guest & service scanning (`wheatley discover` and `/discover`).
-  - Draft configuration generator (`--output config.draft.yaml`).
-- [x] **Phase 3: Check Engine, Alerting & Webhooks**
-  - Check engine scheduler (APScheduler) with pluggable check types.
-  - Built-in checks (`http`, `node_metrics`, `storage`, `guest_state`, `tcp`, `docker`).
-  - Dynamic `{guest:node/vmid}` IP resolution for DHCP resilience.
-  - Alert state transitions (`OK` -> `CRIT` alert, `CRIT` -> `OK` resolved) with deduplication.
-  - Interactive Telegram alert notifications with inline `[🔕 Mute 1h]` / `[🔕 Mute 24h]` buttons.
-  - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088) with vzdump backup event parsing.
-- [x] **Phase 4: LLM-Agnostic Reasoning Engine & Tool Registry**
-  - Pluggable provider architecture (`BaseLLMProvider`) supporting native Google Gemini and OpenAI-compatible endpoints (Ollama, OpenAI, Groq, DeepSeek, vLLM, LocalAI).
-  - Multi-turn function-calling reasoning loop with dynamic cluster telemetry and audit log tools.
-  - Conversational AI chat in Telegram and CLI (`wheatley ask`).
-  - Inline `[🔍 Investigate]` alert button and `/investigate` command for automated root-cause analysis.
-- [x] **Phase 5: Secure Remote Execution & Host Commands**
-  - `ShellExecutor` providing host and guest command execution.
-  - `wheatley-shell` restricted wrapper enforcing security constraints.
-  - Default read-only command allowlist (`DEFAULT_ALLOWLIST`) covering diagnostic utilities (`smartctl`, `lsblk`, `pvesm`, `systemctl`, `docker`).
-- [x] **Phase 6: Interactive Approval Gate for Mutations & Dynamic Allowlist**
-  - Interactive Telegram proposal cards with `[⚡ Run Once]`, `[🛡 Always Allow on <target>]`, and `[❌ Deny]`.
-  - Immediate execution halting on unallowed commands (`CommandExecutionHalted`) saving tokens.
-  - Target-scoped SQLite allowlist store with `/allowlist` management commands.
-  - Strictly sequenced message delivery (LLM explanation message delivered prior to proposal cards).
-- [x] **Phase 7: Self-Health & Watchdog Probes**
-  - Unauthenticated `GET /health` endpoint (200 = healthy, 503 = degraded) for Uptime Kuma or external monitors.
-  - Optional push heartbeat (`push_url`) executed while healthy.
-- [x] **Phase 8: Polish for Sharing**
-  - Entry-point check plugin loading (`wheatley.checks`).
-  - Comprehensive documentation (`docs/quickstart.md`, `docs/checks.md`, `docs/security.md`, `docs/llm_providers.md`).
-  - Makefile with `make check`, `make test`, `make lint`, `make scan`.
-  - Automated sanitization and secret verification script (`scripts/verify_sanitized.sh`).
-
----
-
-## 📄 License
 MIT License. Built for the homelab community.

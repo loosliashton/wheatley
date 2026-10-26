@@ -119,7 +119,7 @@ class UsageTracker:
         req_count = self.get_total_requests(current_month)
 
         lines = [
-            "🤖 *LLM Usage & Activity*",
+            "*LLM Usage & Activity*",
             f"• *Provider:* `{provider}`",
             f"• *Model:* `{model}`",
             f"• *Requests This Month:* `{req_count:,}`",

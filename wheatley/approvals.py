@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import logging
 from pathlib import Path
 import sqlite3
@@ -34,6 +35,7 @@ class Proposal:
     status: str  # "PENDING", "APPROVED", "DENIED", "EXPIRED"
     created_at: datetime
     expires_at: datetime
+    hash: Optional[str] = None
     pattern: Optional[str] = None
     executed_at: Optional[datetime] = None
     execution_result: Optional[str] = None
@@ -76,6 +78,7 @@ class ApprovalStore:
                 """
                 CREATE TABLE IF NOT EXISTS proposals (
                     id TEXT PRIMARY KEY,
+                    hash TEXT,
                     proposal_type TEXT NOT NULL DEFAULT 'ACTION',
                     target TEXT NOT NULL,
                     command TEXT NOT NULL,
@@ -94,6 +97,8 @@ class ApprovalStore:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(proposals)")
             cols = {row["name"] for row in cur.fetchall()}
+            if "hash" not in cols:
+                conn.execute("ALTER TABLE proposals ADD COLUMN hash TEXT")
             if "proposal_type" not in cols:
                 conn.execute("ALTER TABLE proposals ADD COLUMN proposal_type TEXT NOT NULL DEFAULT 'ACTION'")
             if "pattern" not in cols:
@@ -127,6 +132,7 @@ class ApprovalStore:
     ) -> Proposal:
         """Create a new pending proposal."""
         prop_id = f"prop_{uuid.uuid4().hex[:8]}"
+        prop_hash = hashlib.sha256(f"{target}:{command}:{risk}:{pattern or ''}".encode()).hexdigest()
         now = datetime.now(timezone.utc)
         expires = now + timedelta(minutes=expires_minutes)
 
@@ -134,11 +140,12 @@ class ApprovalStore:
             conn.execute(
                 """
                 INSERT INTO proposals (
-                    id, proposal_type, target, command, pattern, summary, risk, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    id, hash, proposal_type, target, command, pattern, summary, risk, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
                 """,
                 (
                     prop_id,
+                    prop_hash,
                     proposal_type,
                     target,
                     command,
@@ -153,6 +160,7 @@ class ApprovalStore:
 
         return Proposal(
             id=prop_id,
+            hash=prop_hash,
             proposal_type=proposal_type,
             target=target,
             command=command,
@@ -186,6 +194,7 @@ class ApprovalStore:
 
             return Proposal(
                 id=row["id"],
+                hash=row["hash"] if "hash" in row.keys() else None,
                 proposal_type=row["proposal_type"],
                 target=row["target"],
                 command=row["command"],

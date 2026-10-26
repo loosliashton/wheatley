@@ -26,10 +26,12 @@ def test_create_and_get_proposal(store):
     assert prop.status == "PENDING"
     assert prop.is_pending is True
     assert prop.is_expired is False
+    assert prop.hash is not None and len(prop.hash) == 64
 
     fetched = store.get_proposal(prop.id)
     assert fetched is not None
     assert fetched.id == prop.id
+    assert fetched.hash == prop.hash
     assert fetched.command == "snapraid status"
     assert fetched.target == "cave/101"
     assert fetched.pattern == "snapraid status *"

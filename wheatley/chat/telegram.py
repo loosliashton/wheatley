@@ -648,15 +648,22 @@ class TelegramBot(ChatInterface):
 
         self.audit.log_event("CHAT", f"tg:{update.effective_user.id}", "user_message", "RECEIVED", details={"text": text[:100]})
 
-        if self.agent and self.agent.is_configured:
-            chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
-            async with TypingIndicator(update.effective_chat):
-                response = await self.agent.chat(text, chat_id=chat_id)
-            await self._send_or_reply(response, target=update.message)
-        else:
+        try:
+            if self.agent and self.agent.is_configured:
+                chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
+                async with TypingIndicator(update.effective_chat):
+                    response = await self.agent.chat(text, chat_id=chat_id)
+                await self._send_or_reply(response, target=update.message)
+            else:
+                await self._send_or_reply(
+                    f"Received: \"{text}\"\n\n"
+                    "_(Note: LLM is not configured. Configure `llm:` in `/etc/wheatley/config.yaml` and set credentials in `/etc/wheatley/secrets.env`.)_",
+                    target=update.message,
+                )
+        except Exception as e:
+            logger.exception("Error processing user message: %s", e)
             await self._send_or_reply(
-                f"Received: \"{text}\"\n\n"
-                "_(Note: LLM is not configured. Configure `llm:` in `/etc/wheatley/config.yaml` and set credentials in `/etc/wheatley/secrets.env`.)_",
+                f"❌ *An error occurred while processing your message:* `{e}`",
                 target=update.message,
             )
 

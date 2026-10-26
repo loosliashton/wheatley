@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List
 import httpx
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
@@ -31,6 +32,7 @@ class DockerCheck(BaseCheck):
         target_containers = self.params.get("containers", "*")
         exclude_list = set(self.params.get("exclude", []))
         alert_on = set(self.params.get("alert_on", ["exited", "unhealthy", "restarting", "dead"]))
+        ignore_exited_0 = bool(self.params.get("ignore_exited_0", True))
 
         containers: List[Dict[str, Any]] = []
         exec_error: str = ""
@@ -114,6 +116,16 @@ class DockerCheck(BaseCheck):
 
             state = str(c.get("State", "")).lower()
             status_desc = str(c.get("Status", "")).lower()
+
+            # Check if container stopped cleanly with exit code 0
+            is_clean_exit = False
+            if "exited" in state or "exited" in status_desc:
+                if re.search(r"\bexited\s*\(\s*0\s*\)", status_desc) or c.get("ExitCode") == 0:
+                    is_clean_exit = True
+
+            if is_clean_exit and ignore_exited_0:
+                healthy_count += 1
+                continue
 
             is_issue = False
             for trigger in alert_on:

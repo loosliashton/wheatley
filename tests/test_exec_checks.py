@@ -82,6 +82,51 @@ async def test_docker_check_alerts_on_issue(mock_context):
 
 
 @pytest.mark.asyncio
+async def test_docker_check_ignores_clean_exited_by_default(mock_context):
+    check = DockerCheck(
+        id="docker-test",
+        type="docker",
+        params={"guest": "cave/100", "alert_on": ["exited", "unhealthy"]},
+    )
+
+    docker_output = (
+        '{"Names": "backup-job", "State": "exited", "Status": "Exited (0) 2 weeks ago"}\n'
+        '{"Names": "plex", "State": "running", "Status": "Up 2 days"}\n'
+    )
+    mock_context.shell.execute_guest_spec = AsyncMock(
+        return_value=ShellResult(
+            command="docker ps", exit_code=0, stdout=docker_output, stderr=""
+        )
+    )
+
+    res = await check.run(mock_context)
+    assert res.status == CheckStatus.OK
+    assert "All 2 Docker containers healthy" in res.summary
+
+
+@pytest.mark.asyncio
+async def test_docker_check_alerts_on_clean_exited_when_disabled(mock_context):
+    check = DockerCheck(
+        id="docker-test",
+        type="docker",
+        params={"guest": "cave/100", "alert_on": ["exited"], "ignore_exited_0": False},
+    )
+
+    docker_output = (
+        '{"Names": "backup-job", "State": "exited", "Status": "Exited (0) 2 weeks ago"}\n'
+    )
+    mock_context.shell.execute_guest_spec = AsyncMock(
+        return_value=ShellResult(
+            command="docker ps", exit_code=0, stdout=docker_output, stderr=""
+        )
+    )
+
+    res = await check.run(mock_context)
+    assert res.status == CheckStatus.CRIT
+    assert "Container 'backup-job' is EXITED" in res.summary
+
+
+@pytest.mark.asyncio
 async def test_systemd_check(mock_context):
     check = SystemdCheck(
         id="sysd-test",

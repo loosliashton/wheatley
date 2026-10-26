@@ -116,3 +116,28 @@ def test_apply_checks_file_update(tmp_path: Path):
     assert yaml_file.read_text(encoding="utf-8") == new_content
     assert backup_path.is_file()
     assert backup_path.read_text(encoding="utf-8") == SAMPLE_CHECKS_YAML
+
+
+def test_apply_checks_file_update_readonly_parent(tmp_path: Path):
+    # Simulate /etc/wheatley where directory is read-only but file is writable
+    sub_dir = tmp_path / "readonly_etc"
+    sub_dir.mkdir()
+    yaml_file = sub_dir / "checks.yaml"
+    yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")
+
+    # Designated backup dir outside the readonly dir
+    backup_dir = tmp_path / "var_lib_backups"
+
+    # Make parent directory read-only
+    sub_dir.chmod(0o555)
+    try:
+        new_content = SAMPLE_CHECKS_YAML + "\n# In-place write\n"
+        backup_path = apply_checks_file_update(yaml_file, new_content, backup_dir=backup_dir)
+
+        assert yaml_file.read_text(encoding="utf-8") == new_content
+        assert backup_path.is_file()
+        assert backup_path.parent == backup_dir
+        assert backup_path.read_text(encoding="utf-8") == SAMPLE_CHECKS_YAML
+    finally:
+        sub_dir.chmod(0o755)
+

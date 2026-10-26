@@ -5,8 +5,10 @@ from __future__ import annotations
 import difflib
 import io
 import logging
+import os
 from pathlib import Path
 import shutil
+import tempfile
 import time
 from typing import Any, List, Optional, Tuple
 from ruamel.yaml import YAML
@@ -117,14 +119,53 @@ def modify_check_config(
     return new_yaml_text, diff, validated_configs
 
 
-def apply_checks_file_update(file_path: Path, new_yaml_text: str) -> Path:
-    """Atomically writes new YAML to file_path after creating a timestamped backup."""
-    backup_path = file_path.with_suffix(f".bak.{int(time.time())}")
+def _get_backup_dir(file_path: Path, backup_dir: Optional[Path] = None) -> Path:
+    """Determine the safest writable directory for configuration backups."""
+    if backup_dir is not None:
+        target_dir = backup_dir
+    elif Path("/var/lib/wheatley").is_dir() and str(file_path).startswith("/etc/"):
+        target_dir = Path("/var/lib/wheatley/backups")
+    elif os.access(file_path.parent, os.W_OK):
+        target_dir = file_path.parent
+    elif Path("/var/lib/wheatley").is_dir():
+        target_dir = Path("/var/lib/wheatley/backups")
+    else:
+        target_dir = Path(tempfile.gettempdir()) / "wheatley_backups"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _write_file_content(file_path: Path, new_content: str) -> None:
+    """Write content to file_path, trying atomic replace if parent is writable, or in-place write if parent is read-only."""
+    if os.access(file_path.parent, os.W_OK):
+        try:
+            tmp_path = file_path.with_suffix(f".tmp.{os.getpid()}")
+            tmp_path.write_text(new_content, encoding="utf-8")
+            tmp_path.replace(file_path)
+            return
+        except OSError:
+            pass
+
+    # In-place write for environments where parent directory is read-only (e.g. systemd ProtectSystem=full)
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def apply_checks_file_update(
+    file_path: Path,
+    new_yaml_text: str,
+    backup_dir: Optional[Path] = None,
+) -> Path:
+    """Safely writes new YAML to file_path after creating a timestamped backup."""
+    target_backup_dir = _get_backup_dir(file_path, backup_dir=backup_dir)
+    backup_path = target_backup_dir / f"{file_path.name}.bak.{int(time.time())}"
+
     if file_path.is_file():
         shutil.copy2(file_path, backup_path)
 
-    tmp_path = file_path.with_suffix(".tmp")
-    tmp_path.write_text(new_yaml_text, encoding="utf-8")
-    tmp_path.replace(file_path)
+    _write_file_content(file_path, new_yaml_text)
     logger.info("Successfully applied checks configuration update to %s (backup: %s)", file_path, backup_path)
     return backup_path

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from wheatley.approvals import ApprovalStore
@@ -182,6 +183,34 @@ class LLMAgent:
                     "required": ["target", "command", "summary", "risk"],
                 },
             ),
+            ToolDefinition(
+                name="propose_check_config_update",
+                description=(
+                    "Propose an update to the checks configuration file (checks.yaml) to add/remove container exclusions, "
+                    "adjust check thresholds, or modify check parameters. "
+                    "This creates an interactive proposal card for the user to review and approve with a diff before anything is changed."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "check_id": {"type": "string", "description": "The ID of the check to update (e.g. 'docker-containers')"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["add_exclude", "remove_exclude", "set_param"],
+                            "description": "The type of configuration modification",
+                        },
+                        "key": {"type": "string", "description": "Parameter key to update (e.g. 'exclude' or parameter name)"},
+                        "values": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of string values (e.g. container names to exclude)",
+                        },
+                        "value": {"type": "string", "description": "Scalar value if setting a single parameter"},
+                        "summary": {"type": "string", "description": "Clear explanation of the proposed change"},
+                    },
+                    "required": ["check_id", "action", "summary"],
+                },
+            ),
         ]
 
     def build_system_prompt(self) -> str:
@@ -253,6 +282,15 @@ class LLMAgent:
                     command=args.get("command", ""),
                     summary=args.get("summary", ""),
                     risk=args.get("risk", "MEDIUM"),
+                )
+            elif name == "propose_check_config_update":
+                return self._tool_propose_check_config_update(
+                    check_id=args.get("check_id", ""),
+                    action=args.get("action", "add_exclude"),
+                    key=args.get("key"),
+                    values=args.get("values"),
+                    value=args.get("value"),
+                    summary=args.get("summary", ""),
                 )
             else:
                 return {"error": f"Unknown tool: '{name}'"}
@@ -471,6 +509,67 @@ class LLMAgent:
             "summary": summary,
             "risk": risk,
             "note": f"Action proposal ({prop.id}) prepared for user review. Explain this to the user; state changes require explicit interactive button approval.",
+        }
+
+    def _tool_propose_check_config_update(
+        self,
+        check_id: str,
+        action: str,
+        summary: str,
+        key: Optional[str] = None,
+        values: Optional[List[str]] = None,
+        value: Any = None,
+    ) -> Dict[str, Any]:
+        from wheatley.tools.config_editor import modify_check_config
+
+        checks_file = getattr(self.config, "checks_file", None)
+        if not checks_file:
+            checks_file = "/etc/wheatley/checks.yaml"
+
+        file_path = Path(checks_file)
+        if not file_path.is_file():
+            return {
+                "status": "ERROR",
+                "error": f"Checks configuration file '{file_path}' does not exist. Please configure checks in '{file_path}'.",
+            }
+
+        try:
+            new_yaml_text, diff, _ = modify_check_config(
+                file_path=file_path,
+                check_id=check_id,
+                action=action,
+                key=key,
+                values=values,
+                value=value,
+            )
+        except Exception as e:
+            logger.warning("Failed to construct check config update: %s", e)
+            return {"status": "ERROR", "error": f"Invalid configuration update: {e}"}
+
+        command_payload = json.dumps({
+            "file": str(file_path),
+            "check_id": check_id,
+            "new_yaml": new_yaml_text,
+            "diff": diff,
+        })
+
+        prop = self.approvals.create_proposal(
+            proposal_type="CONFIG_UPDATE",
+            target=str(file_path),
+            command=command_payload,
+            summary=summary,
+            risk="LOW",
+        )
+        self._dispatch_proposal(prop)
+
+        return {
+            "status": "PROPOSED",
+            "proposal_id": prop.id,
+            "target": str(file_path),
+            "check_id": check_id,
+            "summary": summary,
+            "diff": diff,
+            "note": "Configuration update proposal prepared with diff. Explain this to the user; changes require explicit interactive button approval.",
         }
 
     def _truncate_tool_result(self, result: Any) -> Any:

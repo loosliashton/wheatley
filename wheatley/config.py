@@ -146,6 +146,7 @@ class WheatleyConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     chat: ChatConfig
+    checks_file: Optional[str] = Field(None, description="Path to external checks.yaml file")
     checks: List[CheckConfig] = Field(default_factory=list)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
@@ -224,5 +225,32 @@ def load_config(config_path: str | Path, secrets_path: Optional[str | Path] = No
     data = yaml.safe_load(interpolated)
     if not isinstance(data, dict):
         raise ValueError("Config YAML must be a mapping")
+
+    # Load separate checks.yaml if specified or if checks.yaml exists alongside config_path
+    checks_file_spec = data.get("checks_file")
+    resolved_checks_file: Optional[Path] = None
+    if checks_file_spec:
+        p = Path(checks_file_spec)
+        if not p.is_absolute():
+            p = cfg_file.parent / p
+        resolved_checks_file = p
+    elif (cfg_file.parent / "checks.yaml").is_file():
+        resolved_checks_file = cfg_file.parent / "checks.yaml"
+
+    if resolved_checks_file and resolved_checks_file.is_file():
+        try:
+            with open(resolved_checks_file, "r", encoding="utf-8") as cf:
+                raw_checks = cf.read()
+            interp_checks = interpolate_env_vars(raw_checks)
+            checks_data = yaml.safe_load(interp_checks)
+            if isinstance(checks_data, list):
+                data["checks"] = checks_data
+            elif isinstance(checks_data, dict) and "checks" in checks_data:
+                data["checks"] = checks_data["checks"]
+            data["checks_file"] = str(resolved_checks_file)
+            logger.info("Loaded checks from %s", resolved_checks_file)
+        except Exception as e:
+            logger.error("Failed to load external checks file %s: %s", resolved_checks_file, e)
+            raise
 
     return WheatleyConfig.model_validate(data)

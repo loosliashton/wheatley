@@ -84,6 +84,12 @@ health:
   push_method: GET                   # GET, or POST (sends the health report as JSON)
 
 # Monitored Checks
+# You can define checks directly here, OR separate them into /etc/wheatley/checks.yaml
+# (recommended). Separating checks keeps cluster credentials and nodes isolated and allows
+# Wheatley to safely propose and apply threshold or exclusion changes with your approval.
+# If checks_file is set (or checks.yaml exists alongside config.yaml), it is loaded automatically.
+# checks_file: "/etc/wheatley/checks.yaml"
+
 checks:
   # Cluster & Node Health
   - id: node-health

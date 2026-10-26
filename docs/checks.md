@@ -125,3 +125,16 @@ Wheatley supports external check plugins via standard Python entry points:
    my_custom_check = "my_package.checks:MyCustomCheck"
    ```
 4. Wheatley will automatically discover and load your check on startup.
+
+---
+
+## Separating Checks into `checks.yaml` & Conversational Updates
+
+Checks can live either directly inside `config.yaml` under `checks:`, or in a dedicated `/etc/wheatley/checks.yaml` file (recommended).
+
+### Benefits of `checks.yaml`
+1. **Security Isolation:** `/etc/wheatley/config.yaml` (cluster nodes, tokens, bot credentials) stays read-only and immutable.
+2. **Conversational Adjustments:** You can ask Wheatley directly in chat:
+   > *"Ignore seedboxapi in the docker check"*
+3. **Interactive Human Approval:** Wheatley generates a roundtrip YAML diff and presents an interactive proposal card with **[✅ Approve Update]** and **[❌ Deny]**.
+4. **Zero-Downtime Reload:** When approved, Wheatley backs up `checks.yaml`, applies the update atomically, and reloads the check engine live without restarting the daemon.

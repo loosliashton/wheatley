@@ -89,11 +89,15 @@ Fill in:
 - Your Proxmox node tokens and TLS fingerprints.
 
 ### Step 5: Configure Nodes & Checks
-Copy the generic example configuration to `/etc/wheatley/config.yaml`:
+Copy the generic example configuration and checks files:
 ```bash
 cp config.example.yaml /etc/wheatley/config.yaml
+cp checks.example.yaml /etc/wheatley/checks.yaml
+chmod 644 /etc/wheatley/checks.yaml
 nano /etc/wheatley/config.yaml
 ```
+> **Tip:** By separating checks into `/etc/wheatley/checks.yaml`, Wheatley can dynamically update check parameters (such as container ignore lists or alert thresholds) conversationally via Telegram with your approval while keeping `/etc/wheatley/config.yaml` read-only.
+
 Verify that the configuration parses cleanly:
 ```bash
 wheatley config validate

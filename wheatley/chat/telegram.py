@@ -506,6 +506,35 @@ class TelegramBot(ChatInterface):
     async def _execute_proposal_command(self, prop: Any) -> str:
         if not prop:
             return "❌ Proposal details not found."
+
+        if getattr(prop, "proposal_type", "") == "CONFIG_UPDATE":
+            try:
+                import json
+                from pathlib import Path
+                import yaml as pyyaml
+                from wheatley.config import CheckConfig
+                from wheatley.tools.config_editor import apply_checks_file_update
+
+                payload = json.loads(prop.command)
+                filepath = Path(payload["file"])
+                new_yaml = payload["new_yaml"]
+                backup_path = apply_checks_file_update(filepath, new_yaml)
+
+                if self.check_engine:
+                    raw_data = pyyaml.safe_load(new_yaml)
+                    raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("checks", [])
+                    new_configs = [CheckConfig.model_validate(c) for c in raw_list]
+                    self.check_engine.reload_checks(new_configs)
+
+                return (
+                    f"🟢 *Updated `{filepath.name}` successfully.*\n"
+                    f"• *Backup saved:* `{backup_path.name}`\n"
+                    f"• *Check Engine:* Reloaded with active configuration."
+                )
+            except Exception as e:
+                logger.exception("Failed to apply config update: %s", e)
+                return f"❌ *Failed to apply config update:* `{e}`"
+
         executor = self.shell or (getattr(self.agent, "shell", None) if self.agent else None)
         if not executor:
             return "⚠️ Shell executor not available on bot."
@@ -641,11 +670,18 @@ class TelegramBot(ChatInterface):
                 agent_resumed = False
                 if self.agent and getattr(self.agent, "is_configured", False):
                     chat_id = str(query.message.chat_id) if query.message else "default"
-                    continuation = (
-                        f"Action command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
-                        f"Execution output:\n{res}\n\n"
-                        "Please confirm the result concisely to the user."
-                    )
+                    if prop.proposal_type == "CONFIG_UPDATE":
+                        continuation = (
+                            f"Configuration update for '{prop.target}' was approved and applied.\n"
+                            f"Execution output:\n{res}\n\n"
+                            "Please confirm to the user that the configuration has been updated and the check engine reloaded."
+                        )
+                    else:
+                        continuation = (
+                            f"Action command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
+                            f"Execution output:\n{res}\n\n"
+                            "Please confirm the result concisely to the user."
+                        )
                     try:
                         async with TypingIndicator(query.message.chat if query.message else None):
                             followup = await self.agent.chat(continuation, chat_id=chat_id)
@@ -812,6 +848,29 @@ class TelegramBot(ChatInterface):
                 f"*Suggested Rule:* `{pattern or command}`\n"
                 f"*Summary:* {summary}\n\n"
                 f"Select an option to proceed:"
+            )
+        elif proposal_type == "CONFIG_UPDATE":
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Approve Update", callback_data=f"approve:{proposal_id}"),
+                        InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
+                    ]
+                ]
+            )
+            diff_text = command
+            try:
+                import json
+                data = json.loads(command)
+                diff_text = data.get("diff", command)
+            except Exception:
+                pass
+            msg = (
+                f"📝 *CHECK CONFIG UPDATE PROPOSAL*\n\n"
+                f"*File:* `{target}`\n"
+                f"*Summary:* {summary}\n\n"
+                f"*Proposed Diff:*\n```diff\n{diff_text}\n```\n"
+                f"Tap Approve Update to apply changes and reload the check engine, or Deny to cancel."
             )
         else:
             keyboard = InlineKeyboardMarkup(

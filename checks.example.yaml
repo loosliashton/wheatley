@@ -1,0 +1,72 @@
+# ==============================================================================
+# Wheatley Homelab Agent - Monitored Checks Configuration
+# ==============================================================================
+# This file defines all health checks monitored by Wheatley.
+#
+# Keeping checks in checks.yaml isolates your cluster topology and credentials
+# (in config.yaml and secrets.env) from routine check configuration and allows
+# Wheatley to safely propose and apply threshold or exclusion updates (such as
+# excluding dormant Docker containers) after interactive confirmation in Telegram.
+# ==============================================================================
+
+checks:
+  # Cluster & Node Health
+  - id: node-health
+    type: node_metrics
+    enabled: true
+    interval_seconds: 60
+    params:
+      nodes: "*"
+      cpu_crit_percent: 90
+      mem_crit_percent: 90
+      duration_minutes: 5
+
+  # Storage Pools
+  - id: storage-health
+    type: storage
+    enabled: true
+    interval_seconds: 120
+    params:
+      nodes: "*"
+      warn_percent: 85
+      crit_percent: 95
+
+  # Guest states (auto-detects all onboot guests)
+  - id: guests-up
+    type: guest_state
+    enabled: true
+    interval_seconds: 60
+    params:
+      select:
+        onboot: true
+      exclude: []
+
+  # Service Health Checks
+  - id: plex
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:node1/102}:32400/identity"
+
+  - id: frigate
+    type: http
+    enabled: true
+    interval_seconds: 60
+    params:
+      url: "http://{guest:node1/107}:5000/api/version"
+
+  # Docker Container Monitoring
+  - id: docker-containers
+    type: docker
+    enabled: true
+    interval_seconds: 60
+    params:
+      guest: "node1/100"
+      containers: "*"
+      exclude: []        # Add container names to ignore here
+      ignore_exited_0: true  # Silences cleanly stopped/dormant containers
+      alert_on:
+        - exited
+        - unhealthy
+        - restarting

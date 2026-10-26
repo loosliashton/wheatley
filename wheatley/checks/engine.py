@@ -19,7 +19,7 @@ from wheatley.checks.base import (
     load_plugin_checks,
 )
 import wheatley.checks.builtin  # noqa: F401 - ensure built-ins are registered
-from wheatley.config import WheatleyConfig
+from wheatley.config import CheckConfig, WheatleyConfig
 from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
@@ -91,6 +91,50 @@ class CheckEngine:
             instance = cls(chk_cfg)
             self.checks[chk_cfg.id] = instance
             self.states[chk_cfg.id] = CheckState(check_id=chk_cfg.id)
+
+    def reload_checks(self, new_checks: List[CheckConfig]) -> None:
+        """Dynamically reload checks without restarting the daemon process."""
+        logger.info("Reloading check engine with %d checks...", len(new_checks))
+        self.config.checks = new_checks
+        new_check_ids = {c.id for c in new_checks if c.enabled}
+
+        # Cancel jobs for removed or disabled checks
+        removed_ids = set(self.checks.keys()) - new_check_ids
+        for check_id in removed_ids:
+            job_id = f"job_{check_id}"
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
+            self.checks.pop(check_id, None)
+
+        # Re-initialize new or updated checks
+        load_plugin_checks()
+        for chk_cfg in new_checks:
+            if not chk_cfg.enabled:
+                continue
+
+            cls = get_check_class(chk_cfg.type)
+            if not cls:
+                logger.warning("Unknown check type '%s' for check '%s'", chk_cfg.type, chk_cfg.id)
+                continue
+
+            instance = cls(chk_cfg)
+            self.checks[chk_cfg.id] = instance
+            if chk_cfg.id not in self.states:
+                self.states[chk_cfg.id] = CheckState(check_id=chk_cfg.id)
+
+            if self.scheduler.running:
+                interval = max(chk_cfg.interval_seconds, 10)
+                self.scheduler.add_job(
+                    self.execute_check,
+                    "interval",
+                    seconds=interval,
+                    args=[chk_cfg.id],
+                    id=f"job_{chk_cfg.id}",
+                    replace_existing=True,
+                )
+
+        self.audit.log_event("CONFIG", "engine", "reload_checks", "SUCCESS", details={"active_checks": len(self.checks)})
+        logger.info("Check engine reload complete: %d active checks.", len(self.checks))
 
     def mute_check(self, check_id: str, minutes: int = 60) -> Optional[datetime]:
         """Temporarily mute alerts for a check."""

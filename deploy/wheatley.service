@@ -16,7 +16,7 @@ RestartSec=5s
 # Security sandboxing within LXC
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/var/lib/wheatley /var/log/wheatley /tmp
+ReadWritePaths=/var/lib/wheatley /var/log/wheatley /etc/wheatley/checks.yaml /tmp
 NoNewPrivileges=true
 
 [Install]

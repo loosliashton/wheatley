@@ -70,12 +70,15 @@ Inside CT 110 (or via `pct enter 110`):
    cp /opt/wheatley/config.example.yaml /etc/wheatley/config.yaml
    nano /etc/wheatley/config.yaml
    ```
-   Alternatively, run auto-discovery to generate a draft configuration:
+
+3. **Checks Configuration (`/etc/wheatley/checks.yaml`):**
+   Separating checks isolates cluster nodes and API tokens from check thresholds, and allows Wheatley to conversationally propose and apply updates (e.g. ignoring dormant containers):
    ```bash
-   wheatley discover --output /etc/wheatley/config.draft.yaml
+   cp /opt/wheatley/checks.example.yaml /etc/wheatley/checks.yaml
+   nano /etc/wheatley/checks.yaml
    ```
 
-3. **Validate:**
+4. **Validate:**
    ```bash
    wheatley config validate
    ```

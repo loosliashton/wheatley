@@ -555,6 +555,18 @@ class TelegramBot(ChatInterface):
             self.approvals.record_execution(proposal_id, res[:500])
             await self._send_or_reply(res, target=query.message)
 
+            # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
+            if self.agent and getattr(self.agent, "is_configured", False) and prop:
+                chat_id = str(query.message.chat_id) if query.message else "default"
+                continuation = (
+                    f"Command '{prop.command}' on target '{prop.target}' was executed.\n"
+                    f"Execution output:\n{res}\n\n"
+                    "Please analyze this output and answer my previous question."
+                )
+                async with TypingIndicator(query.message.chat if query.message else None):
+                    followup = await self.agent.chat(continuation, chat_id=chat_id)
+                await self._send_or_reply(followup, target=query.message)
+
         elif data.startswith("allow_always:"):
             proposal_id = data.split(":", 1)[1]
             success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ALWAYS", user_id)
@@ -574,6 +586,18 @@ class TelegramBot(ChatInterface):
             self.approvals.record_execution(proposal_id, res[:500])
             await self._send_or_reply(res, target=query.message)
 
+            # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
+            if self.agent and getattr(self.agent, "is_configured", False) and prop:
+                chat_id = str(query.message.chat_id) if query.message else "default"
+                continuation = (
+                    f"Command '{prop.command}' on target '{prop.target}' was permanently allowed and executed.\n"
+                    f"Execution output:\n{res}\n\n"
+                    "Please analyze this output and answer my previous question."
+                )
+                async with TypingIndicator(query.message.chat if query.message else None):
+                    followup = await self.agent.chat(continuation, chat_id=chat_id)
+                await self._send_or_reply(followup, target=query.message)
+
         elif data.startswith("approve:"):
             proposal_id = data.split(":", 1)[1]
             success, msg = self.approvals.resolve_proposal(proposal_id, "APPROVE", user_id)
@@ -591,6 +615,18 @@ class TelegramBot(ChatInterface):
                     res = await self._execute_proposal_command(prop)
                 self.approvals.record_execution(proposal_id, res[:500])
                 await self._send_or_reply(res, target=query.message)
+
+                if self.agent and getattr(self.agent, "is_configured", False):
+                    chat_id = str(query.message.chat_id) if query.message else "default"
+                    continuation = (
+                        f"Action command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
+                        f"Execution output:\n{res}\n\n"
+                        "Please confirm the result to the user."
+                    )
+                    async with TypingIndicator(query.message.chat if query.message else None):
+                        followup = await self.agent.chat(continuation, chat_id=chat_id)
+                    await self._send_or_reply(followup, target=query.message)
+
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, True, user_id)
 

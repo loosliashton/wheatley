@@ -124,3 +124,50 @@ async def test_callback_allow_once(mock_bot):
     assert updated_prop.executed_at is not None
     # Verify execute_on_host called
     mock_bot.shell.execute_on_host.assert_called_once_with("cave", "smartctl -a /dev/sda", timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_callback_resumes_agent_with_output(mock_bot):
+    prop = mock_bot.approvals.create_proposal(
+        proposal_type="ALLOWLIST_RULE",
+        target="cave/101",
+        command="systemctl list-timers",
+        summary="List timers",
+        pattern="systemctl list-timers *",
+    )
+    mock_bot.shell.execute_in_guest = AsyncMock(
+        return_value=ShellResult(
+            command="systemctl list-timers", exit_code=0, stdout="snapraid.timer active", stderr="", timed_out=False
+        )
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.is_configured = True
+    mock_agent.chat = AsyncMock(return_value="Based on the timer output, SnapRAID ran successfully.")
+    mock_bot.agent = mock_agent
+
+    query = MagicMock(spec=CallbackQuery)
+    query.data = f"allow_once:{prop.id}"
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    query.message = MagicMock()
+    query.message.chat_id = 12345
+
+    update = MagicMock(spec=Update)
+    update.callback_query = query
+    update.effective_user = MagicMock(spec=User)
+    update.effective_user.id = 12345
+
+    mock_bot._send_or_reply = AsyncMock()
+    context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+
+    await mock_bot._handle_callback(update, context)
+
+    # Verify agent was invoked to continue the inquiry with output
+    mock_agent.chat.assert_called_once()
+    continuation_prompt = mock_agent.chat.call_args[0][0]
+    assert "systemctl list-timers" in continuation_prompt
+    assert "snapraid.timer active" in continuation_prompt
+    # Verify the agent's interpretation was sent to user
+    sent_messages = [call[0][0] for call in mock_bot._send_or_reply.call_args_list]
+    assert any("Based on the timer output" in m for m in sent_messages)

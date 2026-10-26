@@ -6,7 +6,7 @@ Monitors ZFS pool health, checksum errors, degradation, and faulted disks via zp
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import List
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 
 logger = logging.getLogger("wheatley.checks.builtin.zfs")

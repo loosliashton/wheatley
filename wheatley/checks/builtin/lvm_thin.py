@@ -6,7 +6,6 @@ Monitors data and metadata utilization for LVM Thin storage pools on Proxmox VE 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 

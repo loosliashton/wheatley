@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List
+from typing import List
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 
 

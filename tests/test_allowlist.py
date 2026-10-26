@@ -1,6 +1,5 @@
 """Unit tests for Command Allowlist Validator"""
 
-import pytest
 from wheatley.tools.allowlist import is_command_allowed
 
 

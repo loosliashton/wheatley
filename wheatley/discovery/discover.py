@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-import socket
 from typing import Any, Dict, List, Optional
 import urllib3
 import httpx
@@ -397,7 +396,7 @@ class InventoryDiscovery:
                         total_services += 1
                         lines.append(f"     └─ 🎯 *{s.name}* (Port `{s.port}`) -> `{s.url_template}`")
                 if g.has_docker:
-                    lines.append(f"     └─ 🐳 *Docker Environment Detected*")
+                    lines.append("     └─ 🐳 *Docker Environment Detected*")
 
             lines.append("")
 

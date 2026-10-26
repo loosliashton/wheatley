@@ -53,10 +53,23 @@ async def test_webhook_pve_flow(tmp_path):
         resp = await client.post("/webhook/pve", json=payload, headers=headers)
         assert resp.status == 200
         assert len(alerts) == 1
-        assert "PROXMOX ALERT" in alerts[0][0]
+        assert "PROXMOX BACKUP FAILED" in alerts[0][0]
         assert "cave" in alerts[0][0]
+        assert "100" in alerts[0][0]
 
-        # 4. Authorized info event (no alert dispatched)
+        # 4. Authorized generic PVE failure (fencing / replication)
+        fencing_payload = {
+            "title": "node fencing event",
+            "message": "Node 2 fencing triggered",
+            "severity": "error",
+            "data": {"type": "fencing", "hostname": "cave"},
+        }
+        resp = await client.post("/webhook/pve", json=fencing_payload, headers=headers)
+        assert resp.status == 200
+        assert len(alerts) == 2
+        assert "PROXMOX ALERT" in alerts[1][0]
+
+        # 5. Authorized info event (no alert dispatched)
         info_payload = {
             "title": "vzdump backup succeeded",
             "message": "INFO: Backup of VM 100 finished successfully",
@@ -65,6 +78,6 @@ async def test_webhook_pve_flow(tmp_path):
         }
         resp = await client.post("/webhook/pve", json=info_payload, headers=headers)
         assert resp.status == 200
-        assert len(alerts) == 1  # Still 1, no new alert
+        assert len(alerts) == 2  # Still 2, no new alert
     finally:
         await client.close()

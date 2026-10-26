@@ -8,6 +8,7 @@ import logging
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger

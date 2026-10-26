@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from wheatley.audit import AuditLogger
 from wheatley.checks.base import (
@@ -16,6 +16,7 @@ from wheatley.checks.base import (
     CheckResult,
     CheckStatus,
     get_check_class,
+    load_plugin_checks,
 )
 import wheatley.checks.builtin  # noqa: F401 - ensure built-ins are registered
 from wheatley.config import WheatleyConfig
@@ -77,6 +78,7 @@ class CheckEngine:
 
     def _initialize_checks(self) -> None:
         """Instantiate configured checks."""
+        load_plugin_checks()
         for chk_cfg in self.config.checks:
             if not chk_cfg.enabled:
                 continue
@@ -97,7 +99,7 @@ class CheckEngine:
             return None
         until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
         state.muted_until = until
-        self.audit.log_event("CHECK", f"engine", f"mute:{check_id}", "MUTED", details={"minutes": minutes, "until": until.isoformat()})
+        self.audit.log_event("CHECK", "engine", f"mute:{check_id}", "MUTED", details={"minutes": minutes, "until": until.isoformat()})
         return until
 
     def unmute_check(self, check_id: str) -> bool:
@@ -106,7 +108,7 @@ class CheckEngine:
         if not state:
             return False
         state.muted_until = None
-        self.audit.log_event("CHECK", f"engine", f"unmute:{check_id}", "UNMUTED")
+        self.audit.log_event("CHECK", "engine", f"unmute:{check_id}", "UNMUTED")
         return True
 
     def get_check_states(self) -> List[Dict[str, Any]]:

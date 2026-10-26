@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -435,7 +433,7 @@ async def test_chat_multi_turn_context_retention(test_env, tmp_path):
     assert captured_messages[0][0].content == "Remember: my secret code is 42"
 
     # Turn 2: should include turn 1 history!
-    reply2 = await agent.chat("What is my code?", chat_id="user_123")
+    await agent.chat("What is my code?", chat_id="user_123")
     assert len(captured_messages[1]) == 3
     assert captured_messages[1][0].role == "user"
     assert captured_messages[1][0].content == "Remember: my secret code is 42"
@@ -448,7 +446,7 @@ async def test_chat_multi_turn_context_retention(test_env, tmp_path):
     assert del_count == 4  # 2 user + 2 assistant messages
 
     # Turn 3 after reset: should start fresh without history
-    reply3 = await agent.chat("Hello fresh turn", chat_id="user_123")
+    await agent.chat("Hello fresh turn", chat_id="user_123")
     assert len(captured_messages[2]) == 1
     assert captured_messages[2][0].content == "Hello fresh turn"
 

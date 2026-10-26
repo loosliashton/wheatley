@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
 import httpx
 
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check

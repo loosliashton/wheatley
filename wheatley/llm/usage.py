@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 import sqlite3
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from wheatley.audit import AuditLogger
 

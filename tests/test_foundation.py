@@ -1,10 +1,8 @@
 """Unit tests for Wheatley configuration and audit engine"""
 
-import os
 from pathlib import Path
-import pytest
 from wheatley.audit import AuditLogger
-from wheatley.config import WheatleyConfig, interpolate_env_vars, load_config
+from wheatley.config import interpolate_env_vars, load_config
 
 
 def test_env_interpolation(monkeypatch):

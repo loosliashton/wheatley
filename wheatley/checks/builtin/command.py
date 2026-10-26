@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 from wheatley.tools.allowlist import is_command_allowed
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 
 

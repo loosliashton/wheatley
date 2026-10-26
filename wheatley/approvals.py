@@ -16,7 +16,7 @@ import hashlib
 import logging
 from pathlib import Path
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import uuid
 
 from wheatley.tools.allowlist import validate_proposed_pattern

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
 
 logger = logging.getLogger("wheatley.checks.builtin.sensors")

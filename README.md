@@ -148,6 +148,8 @@ From your authorized Telegram chat:
 - **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is Frigate slow?"* or *"What guests are running on cave?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis across any configured LLM.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
 - `/checks` — Displays real-time status of all monitored checks and active mute windows.
+- `/allowlist` — Lists all active custom allowlist rules, targets, and dates.
+- `/allowlist revoke <id>` — Revokes a custom command rule.
 - `/usage` — Displays current month & daily LLM token consumption and activity.
 - `/investigate <id>` — Triggers automated root-cause diagnosis on any service check.
 - `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute plex 120`).
@@ -155,6 +157,17 @@ From your authorized Telegram chat:
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
 - `/audit` — Views recent security, webhook, and operational audit events.
 - `/help` — Displays command cheat sheet and operational guidelines.
+
+---
+
+## 📚 Documentation
+
+Detailed guides are available in the [`docs/`](docs/) directory:
+
+- [🚀 Quick Start Guide](docs/quickstart.md) — Step-by-step installation on a fresh Proxmox host.
+- [📋 Check Types Reference](docs/checks.md) — All built-in checks, options, and plugin extensibility.
+- [🛡️ Security & Safety Model](docs/security.md) — Unprivileged LXC, allowlists, and the interactive approval gate.
+- [🤖 LLM Provider Setup](docs/llm_providers.md) — Configuration for Gemini, Ollama, OpenAI, Groq, and vLLM.
 
 ---
 
@@ -179,22 +192,29 @@ From your authorized Telegram chat:
   - Dynamic `{guest:node/vmid}` IP resolution for DHCP resilience.
   - Alert state transitions (`OK` -> `CRIT` alert, `CRIT` -> `OK` resolved) with deduplication.
   - Interactive Telegram alert notifications with inline `[🔕 Mute 1h]` / `[🔕 Mute 24h]` buttons.
-  - Telegram commands: `/checks`, `/mute`, `/unmute`.
-  - CLI check utilities: `wheatley check list`, `wheatley check run <id>`, `wheatley check run-all`.
-  - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088).
+  - Proxmox VE notification webhook receiver (`POST /webhook/pve` on port 8088) with vzdump backup event parsing.
 - [x] **Phase 4: LLM-Agnostic Reasoning Engine & Tool Registry**
   - Pluggable provider architecture (`BaseLLMProvider`) supporting native Google Gemini and OpenAI-compatible endpoints (Ollama, OpenAI, Groq, DeepSeek, vLLM, LocalAI).
-  - Multi-turn function-calling reasoning loop using dynamic live cluster inventory instructions.
-  - Tool registry enabling LLMs to query cluster telemetry, guest details, check states, and audit logs.
-  - Token activity telemetry with no artificial billing caps or execution pauses.
+  - Multi-turn function-calling reasoning loop with dynamic cluster telemetry and audit log tools.
   - Conversational AI chat in Telegram and CLI (`wheatley ask`).
   - Inline `[🔍 Investigate]` alert button and `/investigate` command for automated root-cause analysis.
-- [ ] **Phase 5: Secure Remote Terminal Diagnostics**
-  - SSH wrapper with strict command allowlist.
-- [ ] **Phase 6: Interactive Approval Gate for Mutations**
-  - Cryptographic action hashing, 15-minute expiry, snapshot-before-change prompt.
-- [ ] **Phase 7: Cloud Run Watchdog**
-  - Dead-man's switch heartbeat on GCP Cloud Run + Cloud Scheduler.
+- [x] **Phase 5: Secure Remote Execution & Host Commands**
+  - `ShellExecutor` providing host and guest command execution.
+  - `wheatley-shell` restricted wrapper enforcing security constraints.
+  - Default read-only command allowlist (`DEFAULT_ALLOWLIST`) covering diagnostic utilities (`smartctl`, `lsblk`, `pvesm`, `systemctl`, `docker`).
+- [x] **Phase 6: Interactive Approval Gate for Mutations & Dynamic Allowlist**
+  - Interactive Telegram proposal cards with `[⚡ Run Once]`, `[🛡 Always Allow on <target>]`, and `[❌ Deny]`.
+  - Immediate execution halting on unallowed commands (`CommandExecutionHalted`) saving tokens.
+  - Target-scoped SQLite allowlist store with `/allowlist` management commands.
+  - Strictly sequenced message delivery (LLM explanation message delivered prior to proposal cards).
+- [x] **Phase 7: Self-Health & Watchdog Probes**
+  - Unauthenticated `GET /health` endpoint (200 = healthy, 503 = degraded) for Uptime Kuma or external monitors.
+  - Optional push heartbeat (`push_url`) executed while healthy.
+- [x] **Phase 8: Polish for Sharing**
+  - Entry-point check plugin loading (`wheatley.checks`).
+  - Comprehensive documentation (`docs/quickstart.md`, `docs/checks.md`, `docs/security.md`, `docs/llm_providers.md`).
+  - Makefile with `make check`, `make test`, `make lint`, `make scan`.
+  - Automated sanitization and secret verification script (`scripts/verify_sanitized.sh`).
 
 ---
 

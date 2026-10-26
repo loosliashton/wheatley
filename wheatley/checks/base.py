@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, Optional, Type
 from pydantic import BaseModel, Field
 
 from wheatley.config import CheckConfig, WheatleyConfig
@@ -128,6 +128,31 @@ class BaseCheck(ABC):
 
 # Global Check Registry
 CHECK_REGISTRY: Dict[str, Type[BaseCheck]] = {}
+_PLUGINS_LOADED: bool = False
+
+
+def load_plugin_checks(force_reload: bool = False) -> None:
+    """Discover and register external checks from installed packages via entry points."""
+    global _PLUGINS_LOADED
+    if _PLUGINS_LOADED and not force_reload:
+        return
+    _PLUGINS_LOADED = True
+
+    try:
+        from importlib.metadata import entry_points
+        eps = entry_points(group="wheatley.checks")
+        for ep in eps:
+            try:
+                check_cls = ep.load()
+                if isinstance(check_cls, type) and issubclass(check_cls, BaseCheck):
+                    CHECK_REGISTRY[ep.name] = check_cls
+                    logger.info("Loaded plugin check '%s' from %s", ep.name, ep.value)
+                else:
+                    logger.warning("Plugin '%s' is not a subclass of BaseCheck", ep.name)
+            except Exception as e:
+                logger.warning("Failed to load plugin check '%s': %s", ep.name, e)
+    except Exception as e:
+        logger.warning("Error loading plugin entry points: %s", e)
 
 
 def register_check(type_name: str) -> Callable[[Type[BaseCheck]], Type[BaseCheck]]:
@@ -140,4 +165,6 @@ def register_check(type_name: str) -> Callable[[Type[BaseCheck]], Type[BaseCheck
 
 def get_check_class(type_name: str) -> Optional[Type[BaseCheck]]:
     """Get check implementation class by type name."""
+    if type_name not in CHECK_REGISTRY:
+        load_plugin_checks()
     return CHECK_REGISTRY.get(type_name)

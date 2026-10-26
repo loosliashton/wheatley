@@ -1,6 +1,5 @@
 """Unit tests for Wheatley Auto-Discovery Module"""
 
-from pathlib import Path
 import pytest
 from wheatley.config import WheatleyConfig, TelegramConfig, ChatConfig
 from wheatley.discovery.discover import InventoryDiscovery, DiscoveredGuest, DiscoveredService

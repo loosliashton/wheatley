@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from wheatley.audit import AuditLogger
 from wheatley.checks.base import CheckContext, CheckResult, CheckStatus
-from wheatley.checks.builtin.docker import DockerCheck
 from wheatley.checks.builtin.guest_state import GuestStateCheck
 from wheatley.checks.builtin.http import HttpCheck
 from wheatley.checks.builtin.node_metrics import NodeMetricsCheck
@@ -291,3 +289,22 @@ async def test_check_engine_mute(tmp_path):
     unmuted = engine.unmute_check("http-test")
     assert unmuted is True
     assert engine.states["http-test"].is_muted is False
+
+
+def test_load_plugin_checks():
+    from wheatley.checks.base import BaseCheck, CheckStatus, CHECK_REGISTRY, load_plugin_checks, get_check_class
+
+    class DummyPluginCheck(BaseCheck):
+        async def run(self, context):
+            return CheckResult(check_id=self.id, status=CheckStatus.OK, summary="dummy")
+
+    mock_ep = MagicMock()
+    mock_ep.name = "dummy_plugin"
+    mock_ep.value = "my_package:DummyPluginCheck"
+    mock_ep.load.return_value = DummyPluginCheck
+
+    with patch("importlib.metadata.entry_points", return_value=[mock_ep]):
+        load_plugin_checks(force_reload=True)
+        cls = get_check_class("dummy_plugin")
+        assert cls is DummyPluginCheck
+        assert "dummy_plugin" in CHECK_REGISTRY

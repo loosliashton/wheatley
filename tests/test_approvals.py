@@ -1,7 +1,5 @@
 """Unit tests for ApprovalStore and Dynamic Allowlist System"""
 
-import os
-from datetime import datetime, timedelta, timezone
 import pytest
 from wheatley.approvals import ApprovalStore
 
@@ -149,7 +147,7 @@ def test_list_and_revoke_rules(store):
 
 def test_get_active_proposals(store):
     p1 = store.create_proposal("ALLOWLIST_RULE", "cave", "smartctl --scan", "Scan disks", expires_minutes=15)
-    p2 = store.create_proposal("ALLOWLIST_RULE", "cave", "pvesm status", "Storage status", expires_minutes=-5)
+    store.create_proposal("ALLOWLIST_RULE", "cave", "pvesm status", "Storage status", expires_minutes=-5)
 
     active = store.get_active_proposals()
     assert len(active) == 1

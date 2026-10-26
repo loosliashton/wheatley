@@ -38,3 +38,12 @@ wheatley = "wheatley.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["wheatley*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
+

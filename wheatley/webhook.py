@@ -125,15 +125,29 @@ class WebhookServer:
             details={"title": title, "message": message, "severity": severity, "data": data},
         )
 
+        is_backup = event_type == "vzdump" or "vzdump" in (title + event_type).lower()
+
         if is_failure and self.alert_sink:
-            icon = "🚨 *PROXMOX ALERT*" if severity == "error" else "⚠️ *PROXMOX WARNING*"
-            msg = (
-                f"{icon}\n"
-                f"• *Event:* `{title}`\n"
-                f"• *Node:* `{hostname}`\n"
-                f"• *Severity:* `{severity.upper()}`\n"
-                f"• *Time:* `{now_str}`\n"
-            )
+            if is_backup:
+                icon = "💾 🚨 *PROXMOX BACKUP FAILED*" if severity == "error" else "💾 ⚠️ *PROXMOX BACKUP WARNING*"
+                vmid = data.get("vmid") or data.get("id")
+                guest_info = f"\n• *Guest:* `{vmid}`" if vmid else ""
+                msg = (
+                    f"{icon}\n"
+                    f"• *Node:* `{hostname}`"
+                    f"{guest_info}\n"
+                    f"• *Severity:* `{severity.upper()}`\n"
+                    f"• *Time:* `{now_str}`\n"
+                )
+            else:
+                icon = "🚨 *PROXMOX ALERT*" if severity == "error" else "⚠️ *PROXMOX WARNING*"
+                msg = (
+                    f"{icon}\n"
+                    f"• *Event:* `{title}`\n"
+                    f"• *Node:* `{hostname}`\n"
+                    f"• *Severity:* `{severity.upper()}`\n"
+                    f"• *Time:* `{now_str}`\n"
+                )
             if message:
                 msg += f"\n*Details:*\n```{message[:500]}```"
 

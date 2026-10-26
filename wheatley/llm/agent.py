@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig
-from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinition
+from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolDefinition
 from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker

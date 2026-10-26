@@ -371,7 +371,7 @@ async def test_no_billing_caps_or_pauses(test_env):
 
     # Chat must proceed normally without any budget pause
     reply = await agent.chat("Are you paused?")
-    assert reply == "Still answering!"
+    assert "Still answering!" in reply
 
 
 # --- Conversation Memory & Tool Truncation Tests ---
@@ -487,4 +487,40 @@ async def test_investigate_alert(test_env):
     agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
     diag = await agent.investigate_alert("plex", "HTTP 503 Service Unavailable", chat_id="alert_test")
     assert "Out of memory" in diag
+
+
+@pytest.mark.asyncio
+async def test_llm_footer_distinguishes_ai_messages(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "gemini"
+    mock_provider.model_name = "gemini-3.8-flash"
+
+    # Response with 0 tool calls
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content="Cluster is operating normally.",
+            tool_calls=[],
+        )
+    )
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
+    reply0 = await agent.chat("Status?")
+    assert "Cluster is operating normally." in reply0
+    assert "_🧠 gemini-3.8-flash_" in reply0
+
+    # Response with tool calls
+    resp1 = LLMResponse(
+        content=None,
+        tool_calls=[ToolCall(id="t1", name="get_check_states", arguments={})],
+    )
+    resp2 = LLMResponse(
+        content="All checks look good.",
+        tool_calls=[],
+    )
+    mock_provider.generate_response = AsyncMock(side_effect=[resp1, resp2])
+    reply1 = await agent.chat("Run checks", chat_id="tools_test")
+    assert "All checks look good." in reply1
+    assert "_🧠 gemini-3.8-flash · 1 tool call_" in reply1
+
 

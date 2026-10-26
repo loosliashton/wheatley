@@ -608,6 +608,17 @@ class LLMAgent:
             pass
         return result
 
+    def _format_llm_footer(self, tool_calls_count: int = 0) -> str:
+        """Subtle italicized footer indicating the LLM model and tool executions."""
+        if not getattr(self.config.llm, "show_footer", True):
+            return ""
+        model_name = self.model_name or self.provider_name or "ai"
+        model_disp = model_name.replace("_", "-")
+        if tool_calls_count > 0:
+            plural = "s" if tool_calls_count != 1 else ""
+            return f"\n\n_🧠 {model_disp} · {tool_calls_count} tool call{plural}_"
+        return f"\n\n_🧠 {model_disp}_"
+
     def reset_conversation(self, chat_id: str) -> int:
         """Clear conversation history for a given chat session."""
         return self.memory.clear_history(chat_id)
@@ -659,6 +670,7 @@ class LLMAgent:
             system_instruction = self.build_system_prompt()
             total_input_tokens = 0
             total_output_tokens = 0
+            total_tool_calls = 0
             iterations = 0
             max_iterations = getattr(self.config.llm, "max_tool_iterations", 10)
 
@@ -686,7 +698,9 @@ class LLMAgent:
                     )
                     final_text = response.content or "I processed your request, but received an empty text response."
                     self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                    return final_text
+                    return f"{final_text}{self._format_llm_footer(total_tool_calls)}"
+
+                total_tool_calls += len(response.tool_calls)
 
                 # Append assistant message with requested tool calls
                 messages.append(
@@ -736,7 +750,7 @@ class LLMAgent:
                     )
                     final_text = halted_exception.halt_message
                     self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                    return final_text
+                    return f"{final_text}{self._format_llm_footer(total_tool_calls)}"
 
                 iterations += 1
 
@@ -765,7 +779,7 @@ class LLMAgent:
                 synthesized_text = final_response.content or "Reached diagnostic limit. Please review the findings above."
                 synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
                 self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
-                return synthesized_text
+                return f"{synthesized_text}{self._format_llm_footer(total_tool_calls)}"
             except Exception as e:
                 logger.exception("Failed during turn limit synthesis: %s", e)
                 self.usage.record_usage(
@@ -776,7 +790,7 @@ class LLMAgent:
                 )
                 limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}). Please narrow your query or approve pending commands."
                 self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
-                return limit_msg
+                return f"{limit_msg}{self._format_llm_footer(total_tool_calls)}"
         finally:
             self._defer_proposals = False
 

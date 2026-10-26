@@ -94,7 +94,7 @@ class LLMAgent:
         return [
             ToolDefinition(
                 name="get_cluster_status",
-                description="Query live CPU, RAM, uptime, and guest power states across all Proxmox nodes.",
+                description="Query live CPU, RAM, uptime, and full guest inventory (VMs and LXC containers with VMID, type, name, and power status) across all Proxmox nodes.",
                 parameters={"type": "object", "properties": {}},
             ),
             ToolDefinition(
@@ -313,6 +313,15 @@ class LLMAgent:
                     "uptime_seconds": node_st.get("uptime", 0),
                     "running_guests": [g.get("name") for g in guests if g.get("status") == "running"],
                     "stopped_guests": [g.get("name") for g in guests if g.get("status") == "stopped"],
+                    "guests": [
+                        {
+                            "vmid": g.get("vmid"),
+                            "name": g.get("name"),
+                            "type": g.get("type", "qemu"),
+                            "status": g.get("status"),
+                        }
+                        for g in guests
+                    ],
                 }
             except Exception as e:
                 status_report[name] = {"error": str(e)}
@@ -763,8 +772,14 @@ class LLMAgent:
                     "Synthesize the facts, tool outputs, and diagnostic findings gathered so far into a clear, cohesive final response. "
                     "Report what was discovered, note any pending commands awaiting user approval, and highlight any recommended next steps."
                 )
+                synthesis_messages = list(messages) + [
+                    LLMMessage(
+                        role="user",
+                        content="Diagnostic tool budget reached. Synthesize the findings gathered above and answer my question directly without calling any more tools.",
+                    )
+                ]
                 final_response = await self.provider.generate_response(
-                    messages=messages,
+                    messages=synthesis_messages,
                     tools=[],
                     system_instruction=synthesis_instruction,
                 )
@@ -776,8 +791,16 @@ class LLMAgent:
                     output_tokens=total_output_tokens,
                     context="chat:iteration_limit_synthesized",
                 )
-                synthesized_text = final_response.content or "Reached diagnostic limit. Please review the findings above."
-                synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
+                synthesized_text = (final_response.content or "").strip()
+                if not synthesized_text:
+                    observed_tools = [m.name for m in messages if m.role == "tool" and m.name]
+                    synthesized_text = (
+                        f"⚠️ Reached diagnostic tool budget ({max_iterations} iterations).\n\n"
+                        f"Queried tools during analysis: {', '.join(set(observed_tools)) if observed_tools else 'Cluster telemetry'}.\n"
+                        "Please narrow your query or specify a target guest or node."
+                    )
+                else:
+                    synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
                 self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
                 return f"{synthesized_text}{self._format_llm_footer(total_tool_calls)}"
             except Exception as e:

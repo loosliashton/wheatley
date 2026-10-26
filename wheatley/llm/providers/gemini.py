@@ -181,6 +181,13 @@ class GeminiProvider(BaseLLMProvider):
                 )
 
         text_content = response.text if not tool_calls else (response.text or "")
+        if not text_content and not tool_calls and response.candidates and response.candidates[0].content:
+            parts_text = [
+                p.text for p in (response.candidates[0].content.parts or [])
+                if getattr(p, "text", None)
+            ]
+            if parts_text:
+                text_content = "\n".join(parts_text).strip()
         raw_candidate = response.candidates[0].content if (response.candidates and response.candidates[0].content) else None
         return LLMResponse(
             content=text_content,

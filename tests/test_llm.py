@@ -260,6 +260,7 @@ def test_tool_cluster_status(test_env):
     assert "node-01" in res["nodes"]
     assert res["nodes"]["node-01"]["cpu_percent"] == 5.0
     assert "plex" in res["nodes"]["node-01"]["running_guests"]
+    assert any(g["name"] == "plex" and g["type"] == "lxc" and g["vmid"] == 102 for g in res["nodes"]["node-01"]["guests"])
 
 
 def test_tool_guest_details(test_env):

@@ -220,7 +220,7 @@ class CheckEngine:
             if not state.is_muted and self.alert_sink:
                 icon = "🚨 *CRITICAL ALERT*" if curr_status == CheckStatus.CRIT else "⚠️ *WARNING ALERT*"
                 msg = (
-                    f"{icon}\n"
+                    f"🔔 [MONITOR] {icon}\n"
                     f"• *Check:* `{check_id}` ({check.type})\n"
                     f"• *Status:* `{curr_status.value}`\n"
                     f"• *Issue:* {result.summary}\n"
@@ -241,7 +241,7 @@ class CheckEngine:
             )
             if self.alert_sink:
                 msg = (
-                    f"🟢 *RESOLVED: {check_id}*\n"
+                    f"🔔 [MONITOR] 🟢 *RESOLVED: {check_id}*\n"
                     f"• *Service:* `{check_id}` has returned to normal.\n"
                     f"• *Details:* {result.summary}\n"
                     f"• *Time:* `{result.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}`"

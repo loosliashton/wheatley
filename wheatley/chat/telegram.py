@@ -231,7 +231,7 @@ class TelegramBot(ChatInterface):
             return
         user_name = update.effective_user.first_name if update.effective_user else "Commander"
         msg = (
-            f"👋 *Greetings, {user_name}!*\n\n"
+            f"⚙️ [SYSTEM] 👋 *Greetings, {user_name}!*\n\n"
             f"I'm *Wheatley*, your homelab monitoring & AI administration agent.\n\n"
             f"• `/status` - Check node and service health\n"
             f"• `/checks` - View all active checks & mute states\n"
@@ -250,7 +250,7 @@ class TelegramBot(ChatInterface):
         if not self._is_authorized(update):
             return
         help_text = (
-            "🛠 *Wheatley Commands*\n\n"
+            "⚙️ [SYSTEM] 🛠 *Wheatley Commands*\n\n"
             "/status - Cluster & guest health overview\n"
             "/checks - View all health checks and mute status\n"
             "/usage - LLM token consumption & activity\n"
@@ -273,36 +273,36 @@ class TelegramBot(ChatInterface):
             status_text = await self.status_provider()
         else:
             status_text = "🟢 *Wheatley Core:* Online\nNode checks initializing..."
-        await self._send_or_reply(status_text, target=update.message)
+        await self._send_or_reply(f"⚙️ [SYSTEM] {status_text}", target=update.message)
 
     async def _cmd_discover(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
         self.audit.log_event("CMD", f"tg:{update.effective_user.id}", "/discover", "SUCCESS")
         await self._send_or_reply(
-            "🔍 *Scanning Proxmox nodes and probing guests for services...*\n_This may take a few seconds._",
+            "⚙️ [SYSTEM] 🔍 *Scanning Proxmox nodes and probing guests for services...*\n_This may take a few seconds._",
             target=update.message,
         )
         if self.discovery_provider:
             try:
                 async with TypingIndicator(update.effective_chat):
                     summary = await self.discovery_provider()
-                await self._send_or_reply(summary, target=update.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] {summary}", target=update.message)
             except Exception as e:
                 logger.exception("Telegram /discover failed")
-                await self._send_or_reply(f"❌ *Discovery failed:* `{e}`", target=update.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] ❌ *Discovery failed:* `{e}`", target=update.message)
         else:
-            await self._send_or_reply("⚠️ Auto-discovery provider not connected to bot.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ Auto-discovery provider not connected to bot.", target=update.message)
 
     async def _cmd_audit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
         logs = self.audit.get_recent_logs(limit=8)
         if not logs:
-            await self._send_or_reply("📋 Audit log is currently empty.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] 📋 Audit log is currently empty.", target=update.message)
             return
 
-        lines = ["📋 *Recent Audit Events:*"]
+        lines = ["⚙️ [SYSTEM] 📋 *Recent Audit Events:*"]
         for entry in logs:
             ts = entry["timestamp"][:19].replace("T", " ")
             lines.append(
@@ -314,15 +314,15 @@ class TelegramBot(ChatInterface):
         if not self._is_authorized(update):
             return
         if not self.check_engine:
-            await self._send_or_reply("⚠️ Check engine is not connected to bot.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ Check engine is not connected to bot.", target=update.message)
             return
 
         states = self.check_engine.get_check_states()
         if not states:
-            await self._send_or_reply("ℹ️ No health checks currently configured.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ℹ️ No health checks currently configured.", target=update.message)
             return
 
-        lines = [f"🔍 *Wheatley Monitored Checks ({len(states)})*\n"]
+        lines = [f"⚙️ [SYSTEM] 🩺 *Wheatley Monitored Checks ({len(states)})*\n"]
         for s in states:
             cid = s["id"]
             ctype = s["type"]
@@ -356,7 +356,7 @@ class TelegramBot(ChatInterface):
         if not self._is_authorized(update):
             return
         if not self.check_engine:
-            await self._send_or_reply("⚠️ Check engine is not connected.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ Check engine is not connected.", target=update.message)
             return
 
         args = context.args or []
@@ -364,7 +364,7 @@ class TelegramBot(ChatInterface):
             states = self.check_engine.get_check_states()
             check_ids = [f"`{s['id']}`" for s in states]
             msg = (
-                "⚠️ *Usage:* `/mute <check_id> [minutes]`\n"
+                "⚙️ [SYSTEM] ⚠️ *Usage:* `/mute <check_id> [minutes]`\n"
                 "Example: `/mute plex 120` (default: 60 minutes)\n\n"
                 f"Available checks: {', '.join(check_ids) if check_ids else 'None'}"
             )
@@ -377,17 +377,17 @@ class TelegramBot(ChatInterface):
             try:
                 minutes = int(args[1])
             except ValueError:
-                await self._send_or_reply("❌ Minutes must be a whole number, e.g. `/mute plex 60`", target=update.message)
+                await self._send_or_reply("⚙️ [SYSTEM] ❌ Minutes must be a whole number, e.g. `/mute plex 60`", target=update.message)
                 return
 
         until = self.check_engine.mute_check(check_id, minutes)
         if not until:
-            await self._send_or_reply(f"❌ Check `{check_id}` not found.", target=update.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] ❌ Check `{check_id}` not found.", target=update.message)
             return
 
         until_str = until.strftime("%Y-%m-%d %H:%M:%S UTC")
         await self._send_or_reply(
-            f"🔕 *Muted check* `{check_id}` for {minutes} minutes.\nAlerts silenced until `{until_str}`.",
+            f"🔔 [MONITOR] 🔕 *Muted check* `{check_id}` for {minutes} minutes.\nAlerts silenced until `{until_str}`.",
             target=update.message,
         )
 
@@ -395,20 +395,20 @@ class TelegramBot(ChatInterface):
         if not self._is_authorized(update):
             return
         if not self.check_engine:
-            await self._send_or_reply("⚠️ Check engine is not connected.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ Check engine is not connected.", target=update.message)
             return
 
         args = context.args or []
         if not args:
-            await self._send_or_reply("⚠️ *Usage:* `/unmute <check_id>`", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ *Usage:* `/unmute <check_id>`", target=update.message)
             return
 
         check_id = args[0]
         success = self.check_engine.unmute_check(check_id)
         if success:
-            await self._send_or_reply(f"🔔 *Unmuted check* `{check_id}`. Alerts are re-enabled.", target=update.message)
+            await self._send_or_reply(f"🔔 [MONITOR] 🔔 *Unmuted check* `{check_id}`. Alerts are re-enabled.", target=update.message)
         else:
-            await self._send_or_reply(f"❌ Check `{check_id}` not found.", target=update.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] ❌ Check `{check_id}` not found.", target=update.message)
 
     async def _cmd_usage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -418,12 +418,12 @@ class TelegramBot(ChatInterface):
                 provider=getattr(self.agent, "provider_name", "llm"),
                 model=getattr(self.agent, "model_name", "default"),
             )
-            await self._send_or_reply(msg, target=update.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] {msg}", target=update.message)
         elif self.budget:
             msg = self.budget.format_usage_markdown()
-            await self._send_or_reply(msg, target=update.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] {msg}", target=update.message)
         else:
-            await self._send_or_reply("⚠️ Token usage tracker is not connected.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ Token usage tracker is not connected.", target=update.message)
 
     async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -431,27 +431,27 @@ class TelegramBot(ChatInterface):
         chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
         if self.agent and hasattr(self.agent, "reset_conversation"):
             deleted = self.agent.reset_conversation(chat_id)
-            await self._send_or_reply(f"🧹 *Conversation memory cleared.* ({deleted} turns removed)", target=update.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] 🧹 *Conversation memory cleared.* ({deleted} turns removed)", target=update.message)
         else:
-            await self._send_or_reply("🧹 Conversation reset.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] 🧹 Conversation reset.", target=update.message)
 
     async def _cmd_investigate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
         args = context.args or []
         if not args:
-            await self._send_or_reply("⚠️ *Usage:* `/investigate <check_id>` (e.g. `/investigate plex`)", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ *Usage:* `/investigate <check_id>` (e.g. `/investigate plex`)", target=update.message)
             return
 
         check_id = args[0]
         if not self.agent or not self.agent.is_configured:
-            await self._send_or_reply("⚠️ LLM is not configured.", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ LLM is not configured.", target=update.message)
             return
 
         model_name = getattr(self.agent, "model_name", "LLM")
         chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
         await self._send_or_reply(
-            f"🔍 *Investigating `{check_id}` with {model_name}...*",
+            f"⚙️ [SYSTEM] 🔍 *Investigating `{check_id}` with {model_name}...*",
             target=update.message,
         )
         async with TypingIndicator(update.effective_chat):
@@ -472,14 +472,14 @@ class TelegramBot(ChatInterface):
             rules = self.approvals.list_user_rules()
             if not rules:
                 await self._send_or_reply(
-                    "🛡 *Active User Allowlist Rules*\n\n"
+                    "⚙️ [SYSTEM] 🛡️ *Active User Allowlist Rules*\n\n"
                     "No custom allowlist rules configured.\n"
                     "Commands requested during chat or diagnostics can be approved to Run Once or permanently added here.",
                     target=update.message,
                 )
                 return
 
-            lines = [f"🛡 *Active User Allowlist Rules ({len(rules)})*\n"]
+            lines = [f"⚙️ [SYSTEM] 🛡️ *Active User Allowlist Rules ({len(rules)})*\n"]
             for r in rules:
                 created = r.created_at.strftime("%Y-%m-%d %H:%M")
                 lines.append(f"• *#{r.id}* on `{r.target}`: `{r.pattern}`\n  _Added {created}_")
@@ -492,16 +492,16 @@ class TelegramBot(ChatInterface):
             try:
                 rule_id = int(args[1])
             except ValueError:
-                await self._send_or_reply("❌ Rule ID must be an integer, e.g. `/allowlist revoke 1`", target=update.message)
+                await self._send_or_reply("⚙️ [SYSTEM] ❌ Rule ID must be an integer, e.g. `/allowlist revoke 1`", target=update.message)
                 return
 
             if self.approvals.revoke_user_rule(rule_id):
                 self.audit.log_event("ALLOWLIST", f"tg:{update.effective_user.id}", f"revoke:{rule_id}", "REVOKED")
-                await self._send_or_reply(f"✅ *Revoked allowlist rule #{rule_id}.*", target=update.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] ✅ *Revoked allowlist rule #{rule_id}.*", target=update.message)
             else:
-                await self._send_or_reply(f"❌ Allowlist rule #{rule_id} not found.", target=update.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] ❌ Allowlist rule #{rule_id} not found.", target=update.message)
         else:
-            await self._send_or_reply("⚠️ *Usage:* `/allowlist` (list rules) or `/allowlist revoke <id>` (remove rule)", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] ⚠️ *Usage:* `/allowlist` (list rules) or `/allowlist revoke <id>` (remove rule)", target=update.message)
 
     async def _execute_proposal_command(self, prop: Any) -> str:
         if not prop:
@@ -527,17 +527,17 @@ class TelegramBot(ChatInterface):
                     self.check_engine.reload_checks(new_configs)
 
                 return (
-                    f"🟢 *Updated `{filepath.name}` successfully.*\n"
+                    f"⚙️ [SYSTEM] 🟢 *Updated `{filepath.name}` successfully.*\n"
                     f"• *Backup saved:* `{backup_path.name}`\n"
                     f"• *Check Engine:* Reloaded with active configuration."
                 )
             except Exception as e:
                 logger.exception("Failed to apply config update: %s", e)
-                return f"❌ *Failed to apply config update:* `{e}`"
+                return f"⚙️ [SYSTEM] ❌ *Failed to apply config update:* `{e}`"
 
         executor = self.shell or (getattr(self.agent, "shell", None) if self.agent else None)
         if not executor:
-            return "⚠️ Shell executor not available on bot."
+            return "⚙️ [SYSTEM] ⚠️ Shell executor not available on bot."
 
         target = prop.target.strip()
         command = prop.command.strip()
@@ -553,12 +553,12 @@ class TelegramBot(ChatInterface):
             status_icon = "🟢" if res.success else "🔴"
             output = res.stdout.strip() or res.stderr.strip() or "(no output)"
             return (
-                f"{status_icon} *Output on `{target}` (exit code {res.exit_code}):*\n"
+                f"⚙️ [SYSTEM] {status_icon} *Output on `{target}` (exit code {res.exit_code}):*\n"
                 f"```bash\n{output}\n```"
             )
         except Exception as e:
             logger.exception("Failed to execute proposal command: %s", e)
-            return f"❌ *Execution error on `{target}`:* `{e}`"
+            return f"⚙️ [SYSTEM] ❌ *Execution error on `{target}`:* `{e}`"
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -577,13 +577,13 @@ class TelegramBot(ChatInterface):
             success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ONCE", user_id)
             if not success:
                 await query.edit_message_reply_markup(reply_markup=None)
-                await self._send_or_reply(f"❌ *Could not execute:* {msg}", target=query.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] ❌ *Could not execute:* {msg}", target=query.message)
                 return
 
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("ALLOWLIST", f"tg:{user_id}", f"allow_once:{proposal_id}", "APPROVED", details={"cmd": prop.command if prop else ""})
             await query.edit_message_reply_markup(reply_markup=None)
-            await self._send_or_reply(f"⚡ *Executing once on `{prop.target if prop else 'target'}`...*", target=query.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] ⚡ *Executing once on `{prop.target if prop else 'target'}`...*", target=query.message)
             async with TypingIndicator(query.message.chat if query.message else None):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
@@ -615,7 +615,7 @@ class TelegramBot(ChatInterface):
             success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ALWAYS", user_id)
             if not success:
                 await query.edit_message_reply_markup(reply_markup=None)
-                await self._send_or_reply(f"❌ *Could not save rule:* {msg}", target=query.message)
+                await self._send_or_reply(f"⚙️ [SYSTEM] ❌ *Could not save rule:* {msg}", target=query.message)
                 return
 
             prop = self.approvals.get_proposal(proposal_id)
@@ -623,7 +623,7 @@ class TelegramBot(ChatInterface):
             await query.edit_message_reply_markup(reply_markup=None)
             target_str = prop.target if prop else "target"
             pattern_str = prop.pattern if prop else "rule"
-            await self._send_or_reply(f"🛡 *Added rule `{pattern_str}` to allowlist for `{target_str}`.*\nExecuting command now...", target=query.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] 🛡️ *Added rule `{pattern_str}` to allowlist for `{target_str}`.*\nExecuting command now...", target=query.message)
             async with TypingIndicator(query.message.chat if query.message else None):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
@@ -661,7 +661,7 @@ class TelegramBot(ChatInterface):
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"approve:{proposal_id}", "APPROVED")
             await query.edit_message_reply_markup(reply_markup=None)
-            await self._send_or_reply(f"✅ *Proposal {proposal_id} approved.* Executing...", target=query.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] ✅ *Proposal {proposal_id} approved.* Executing...", target=query.message)
             if prop:
                 async with TypingIndicator(query.message.chat if query.message else None):
                     res = await self._execute_proposal_command(prop)
@@ -705,7 +705,7 @@ class TelegramBot(ChatInterface):
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"deny:{proposal_id}", "DENIED")
             await query.edit_message_reply_markup(reply_markup=None)
             cmd_name = prop.command if prop else f"Proposal {proposal_id}"
-            await self._send_or_reply(f"❌ *Denied permission for `{cmd_name}`.*", target=query.message)
+            await self._send_or_reply(f"⚙️ [SYSTEM] ❌ *Denied permission for `{cmd_name}`.*", target=query.message)
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, False, user_id)
 
@@ -733,7 +733,7 @@ class TelegramBot(ChatInterface):
                 until_str = until.strftime("%H:%M UTC") if until else f"{minutes}m"
                 await query.edit_message_reply_markup(reply_markup=None)
                 await self._send_or_reply(
-                    f"🔕 *Muted check* `{check_id}` for {minutes}m (until `{until_str}`).",
+                    f"🔔 [MONITOR] 🔕 *Muted check* `{check_id}` for {minutes}m (until `{until_str}`).",
                     target=query.message,
                 )
 
@@ -744,7 +744,7 @@ class TelegramBot(ChatInterface):
                 chat_id = str(query.message.chat_id) if query.message else "default"
                 self.audit.log_event("AI", f"tg:{user_id}", f"investigate:{check_id}", "TRIGGERED")
                 await self._send_or_reply(
-                    f"🔍 *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
+                    f"⚙️ [SYSTEM] 🔍 *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
                     target=query.message,
                 )
                 async with TypingIndicator(query.message.chat if query.message else None):
@@ -842,7 +842,7 @@ class TelegramBot(ChatInterface):
                 ]
             )
             msg = (
-                f"🛡 *COMMAND ALLOWLIST PROPOSAL*\n\n"
+                f"⚙️ [SYSTEM] 🛡️ *COMMAND ALLOWLIST PROPOSAL*\n\n"
                 f"*Target:* `{target}`\n"
                 f"*Command to execute:*\n```bash\n{command}\n```\n"
                 f"*Suggested Rule:* `{pattern or command}`\n"
@@ -866,7 +866,7 @@ class TelegramBot(ChatInterface):
             except Exception:
                 pass
             msg = (
-                f"📝 *CHECK CONFIG UPDATE PROPOSAL*\n\n"
+                f"⚙️ [SYSTEM] 📝 *CHECK CONFIG UPDATE PROPOSAL*\n\n"
                 f"*File:* `{target}`\n"
                 f"*Summary:* {summary}\n\n"
                 f"*Proposed Diff:*\n```diff\n{diff_text}\n```\n"
@@ -882,7 +882,7 @@ class TelegramBot(ChatInterface):
                 ]
             )
             msg = (
-                f"⚠️ *ACTION PROPOSAL REQUIRED*\n\n"
+                f"⚙️ [SYSTEM] ⚠️ *ACTION PROPOSAL REQUIRED*\n\n"
                 f"*Target:* `{target}`\n"
                 f"*Risk Level:* `{risk}`\n"
                 f"*Summary:* {summary}\n\n"

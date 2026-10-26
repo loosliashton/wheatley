@@ -133,7 +133,7 @@ class WebhookServer:
                 vmid = data.get("vmid") or data.get("id")
                 guest_info = f"\n• *Guest:* `{vmid}`" if vmid else ""
                 msg = (
-                    f"{icon}\n"
+                    f"🔔 [MONITOR] {icon}\n"
                     f"• *Node:* `{hostname}`"
                     f"{guest_info}\n"
                     f"• *Severity:* `{severity.upper()}`\n"
@@ -142,7 +142,7 @@ class WebhookServer:
             else:
                 icon = "🚨 *PROXMOX ALERT*" if severity == "error" else "⚠️ *PROXMOX WARNING*"
                 msg = (
-                    f"{icon}\n"
+                    f"🔔 [MONITOR] {icon}\n"
                     f"• *Event:* `{title}`\n"
                     f"• *Node:* `{hostname}`\n"
                     f"• *Severity:* `{severity.upper()}`\n"
@@ -176,7 +176,7 @@ class WebhookServer:
 
         if self.alert_sink and payload.get("alert"):
             summary = payload.get("summary", "Generic webhook alert triggered")
-            msg = f"⚠️ *WEBHOOK ALERT*\n• *Summary:* {summary}\n• *Source:* `{request.remote}`"
+            msg = f"🔔 [MONITOR] ⚠️ *WEBHOOK ALERT*\n• *Summary:* {summary}\n• *Source:* `{request.remote}`"
             await self.alert_sink(msg, {"type": "webhook_alert", "source": "generic"})
 
         return web.json_response({"status": "received"})

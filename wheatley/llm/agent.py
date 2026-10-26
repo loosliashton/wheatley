@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig
@@ -15,7 +16,7 @@ from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinit
 from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker
-from wheatley.tools.allowlist import is_command_allowed
+from wheatley.tools.allowlist import is_command_allowed, validate_proposed_pattern
 from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
@@ -44,6 +45,10 @@ class LLMAgent:
 
         # Conversation Memory (SQLite-backed)
         self.memory = kwargs.get("memory") or ConversationStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
+
+        # Approval & Dynamic Allowlist Store (SQLite-backed)
+        self.approvals = kwargs.get("approvals") or ApprovalStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
+        self.proposal_sink: Optional[Callable[[Any], Coroutine[Any, Any, None]]] = kwargs.get("proposal_sink")
 
         # Usage tracker (records tokens without billing blocks/caps)
         if usage is not None:
@@ -204,7 +209,11 @@ class LLMAgent:
             "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call the 'propose_action' function so the user can review and approve it via Telegram buttons.",
             "3. Telegram Mobile Formatting: Homelab administrators read your messages on Telegram mobile screens. Format your answers cleanly: use bullet points (•) for lists, **bold** for key names and metrics, and triple-backtick code blocks for CLI commands. Avoid markdown tables (they do not render well on mobile; format tabular data as bullet lists instead).",
             "4. Grounded in Facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
-            "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. docker ps, docker logs, uptime, free, df, systemctl status, journalctl, sensors, smartctl). Non-allowlisted or state-changing commands will automatically produce an interactive approval proposal.",
+            "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. lsblk, smartctl, sensors, uptime, free, df, docker ps, docker logs, systemctl status, journalctl). Non-allowlisted commands will automatically produce an interactive approval proposal for the user to run once or permanently allow.",
+            "6. Tool Budget & Anti-Fishing Efficiency: You have a strict limit of function calling iterations per query. Plan your diagnostics efficiently:",
+            "   • NEVER make speculative, trial-and-error, or guessing calls (e.g. testing drive paths /dev/sda, /dev/sdb... or guessing service names).",
+            "   • ALWAYS run discovery commands first: use 'lsblk' or 'smartctl --scan' to discover disks, or 'systemctl list-units' / 'systemctl list-timers' to find active units.",
+            "   • If a diagnostic command requires user approval or is blocked, explain clearly to the user what command is required rather than repeatedly guessing alternatives.",
         ]
         return "\n".join(lines)
 
@@ -312,20 +321,62 @@ class LLMAgent:
             "details": res.details,
         }
 
+    def _dispatch_proposal(self, prop: Any) -> None:
+        if self.proposal_sink:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.proposal_sink(prop))
+            except RuntimeError:
+                pass
+            except Exception as e:
+                logger.warning("Failed to dispatch proposal to sink: %s", e)
+
     async def _tool_run_host_command(self, node: str, command: str) -> Dict[str, Any]:
-        allowed, reason = is_command_allowed(command, self.config.allowlist)
+        target = node
+        active_user_rules = self.approvals.get_active_allowlist(target)
+        effective_allowlist = list(self.config.allowlist) + active_user_rules
+        allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
-            logger.info("Host command '%s' on %s blocked by allowlist (%s); proposing action", command, node, reason)
-            proposal = self._tool_propose_action(
-                target=node,
+            logger.info("Host command '%s' on %s blocked by allowlist (%s); proposing allowlist rule", command, node, reason)
+            cmd_parts = command.strip().split()
+            candidate_pattern = None
+            if len(cmd_parts) >= 2:
+                candidate = f"{cmd_parts[0]} {cmd_parts[1]} *"
+                valid, _ = validate_proposed_pattern(candidate)
+                if valid:
+                    candidate_pattern = candidate
+            if not candidate_pattern:
+                valid, _ = validate_proposed_pattern(command.strip())
+                candidate_pattern = command.strip() if valid else command.strip()
+
+            prop = self.approvals.create_proposal(
+                proposal_type="ALLOWLIST_RULE",
+                target=target,
                 command=command,
-                summary=f"Run command on host {node}: {command}",
-                risk="HIGH" if any(w in command for w in ("rm", "dd", "mkfs", "reboot", "shutdown")) else "MEDIUM",
+                pattern=candidate_pattern,
+                summary=f"Allow read command on {target}: {command}",
+                risk="LOW",
             )
+            self._dispatch_proposal(prop)
+            proposal_dict = {
+                "id": prop.id,
+                "target": target,
+                "command": command,
+                "summary": prop.summary,
+                "risk": prop.risk,
+            }
             return {
                 "status": "REQUIRES_APPROVAL",
-                "message": f"Command '{command}' is not in the read-only allowlist ({reason}). An interactive approval proposal has been created.",
-                "proposal": proposal,
+                "proposal_id": prop.id,
+                "proposal_type": prop.proposal_type,
+                "target": target,
+                "command": command,
+                "pattern": candidate_pattern,
+                "proposal": proposal_dict,
+                "message": (
+                    f"Command '{command}' is not in the read-only allowlist ({reason}). "
+                    f"An interactive approval proposal ({prop.id}) has been presented to the user to Run Once or Always Allow on {target}."
+                ),
             }
 
         res = await self.shell.execute_on_host(node, command, timeout=20)
@@ -340,20 +391,51 @@ class LLMAgent:
         }
 
     async def _tool_run_guest_command(self, node: str, vmid: int, command: str) -> Dict[str, Any]:
-        allowed, reason = is_command_allowed(command, self.config.allowlist)
         target = f"{node}/{vmid}"
+        active_user_rules = self.approvals.get_active_allowlist(target)
+        effective_allowlist = list(self.config.allowlist) + active_user_rules
+        allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
-            logger.info("Guest command '%s' on %s blocked by allowlist (%s); proposing action", command, target, reason)
-            proposal = self._tool_propose_action(
+            logger.info("Guest command '%s' on %s blocked by allowlist (%s); proposing allowlist rule", command, target, reason)
+            cmd_parts = command.strip().split()
+            candidate_pattern = None
+            if len(cmd_parts) >= 2:
+                candidate = f"{cmd_parts[0]} {cmd_parts[1]} *"
+                valid, _ = validate_proposed_pattern(candidate)
+                if valid:
+                    candidate_pattern = candidate
+            if not candidate_pattern:
+                valid, _ = validate_proposed_pattern(command.strip())
+                candidate_pattern = command.strip() if valid else command.strip()
+
+            prop = self.approvals.create_proposal(
+                proposal_type="ALLOWLIST_RULE",
                 target=target,
                 command=command,
-                summary=f"Run command on guest {target}: {command}",
-                risk="HIGH" if any(w in command for w in ("rm", "dd", "mkfs", "reboot", "shutdown")) else "MEDIUM",
+                pattern=candidate_pattern,
+                summary=f"Allow read command on {target}: {command}",
+                risk="LOW",
             )
+            self._dispatch_proposal(prop)
+            proposal_dict = {
+                "id": prop.id,
+                "target": target,
+                "command": command,
+                "summary": prop.summary,
+                "risk": prop.risk,
+            }
             return {
                 "status": "REQUIRES_APPROVAL",
-                "message": f"Command '{command}' is not in the read-only allowlist ({reason}). An interactive approval proposal has been created.",
-                "proposal": proposal,
+                "proposal_id": prop.id,
+                "proposal_type": prop.proposal_type,
+                "target": target,
+                "command": command,
+                "pattern": candidate_pattern,
+                "proposal": proposal_dict,
+                "message": (
+                    f"Command '{command}' is not in the read-only allowlist ({reason}). "
+                    f"An interactive approval proposal ({prop.id}) has been presented to the user to Run Once or Always Allow on {target}."
+                ),
             }
 
         res = await self.shell.execute_in_guest(node, vmid, command, timeout=20)
@@ -379,13 +461,24 @@ class LLMAgent:
                 "reason": f"Self-protection triggered: Target '{target}' is running the Wheatley agent.",
             }
 
+        prop = self.approvals.create_proposal(
+            proposal_type="ACTION",
+            target=target,
+            command=command,
+            summary=summary,
+            risk=risk,
+        )
+        self._dispatch_proposal(prop)
+
         return {
             "status": "PROPOSED",
+            "proposal_id": prop.id,
+            "proposal_type": prop.proposal_type,
             "target": target,
             "command": command,
             "summary": summary,
             "risk": risk,
-            "note": "Proposal prepared. Explain this to the user; state changes require explicit interactive button approval.",
+            "note": f"Action proposal ({prop.id}) prepared for user review. Explain this to the user; state changes require explicit interactive button approval.",
         }
 
     def _truncate_tool_result(self, result: Any) -> Any:
@@ -528,16 +621,43 @@ class LLMAgent:
 
             iterations += 1
 
-        # Iteration cap reached
-        self.usage.record_usage(
-            model=self.model_name,
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens,
-            context="chat:iteration_limit",
-        )
-        limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}) without completing. Please narrow your query."
-        self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
-        return limit_msg
+        # Iteration cap reached - synthesize observations gathered so far into a cohesive answer
+        try:
+            logger.info("Reached maximum iterations (%d); synthesizing observations into final answer", max_iterations)
+            synthesis_instruction = (
+                f"{system_instruction}\n\n"
+                "CRITICAL: You have reached the diagnostic tool iteration budget. "
+                "Synthesize the facts, tool outputs, and diagnostic findings gathered so far into a clear, cohesive final response. "
+                "Report what was discovered, note any pending commands awaiting user approval, and highlight any recommended next steps."
+            )
+            final_response = await self.provider.generate_response(
+                messages=messages,
+                tools=[],
+                system_instruction=synthesis_instruction,
+            )
+            total_input_tokens += final_response.input_tokens
+            total_output_tokens += final_response.output_tokens
+            self.usage.record_usage(
+                model=self.model_name,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                context="chat:iteration_limit_synthesized",
+            )
+            synthesized_text = final_response.content or "Reached diagnostic limit. Please review the findings above."
+            synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
+            self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
+            return synthesized_text
+        except Exception as e:
+            logger.exception("Failed during turn limit synthesis: %s", e)
+            self.usage.record_usage(
+                model=self.model_name,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                context="chat:iteration_limit_fallback",
+            )
+            limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}). Please narrow your query or approve pending commands."
+            self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
+            return limit_msg
 
     async def investigate_alert(
         self,

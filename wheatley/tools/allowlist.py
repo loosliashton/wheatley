@@ -4,48 +4,65 @@ Ensures strict read-only execution safety:
 1. Rejects shell injection, chaining (;, &&, ||), backgrounding (&), and subshells ($(), ``).
 2. Rejects file redirection (>, >>, <, <<).
 3. Restricts pipes (|) exclusively to safe, read-only filters (grep, jq, awk, head, tail, etc.).
-4. Matches the primary command against an authorized glob-based allowlist.
+4. Checks for forbidden mutating flags/arguments on known diagnostic tools.
+5. Matches the primary command against an authorized glob-based allowlist.
+6. Validates proposed user-learned patterns before they can be added to the allowlist.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import logging
+from pathlib import Path
 import re
 import shlex
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("wheatley.tools.allowlist")
 
 DEFAULT_ALLOWLIST: List[str] = [
-    "uptime*",
-    "free*",
-    "df*",
+    "uptime",
+    "free",
+    "free -*",
+    "df",
+    "df -*",
     "top -b -n *",
-    "journalctl*",
-    "systemctl status*",
-    "systemctl is-active*",
-    "systemctl is-failed*",
-    "docker ps*",
-    "docker logs*",
-    "docker inspect*",
+    "journalctl",
+    "journalctl -n *",
+    "journalctl -u *",
+    "journalctl --no-pager*",
+    "systemctl status *",
+    "systemctl is-active *",
+    "systemctl is-failed *",
+    "docker ps",
+    "docker ps -*",
+    "docker logs *",
+    "docker inspect *",
     "docker stats --no-stream*",
-    "zpool status*",
-    "zpool list*",
-    "smartctl -H*",
-    "smartctl -a*",
-    "smartctl -i*",
-    "sensors*",
-    "pvesm status*",
-    "pvesm list*",
-    "pveversion*",
+    "zpool status",
+    "zpool status *",
+    "zpool list",
+    "zpool list *",
+    "smartctl -H *",
+    "smartctl -a *",
+    "smartctl -i *",
+    "sensors",
+    "sensors -j*",
+    "pvesm status",
+    "pvesm status *",
+    "pvesm list *",
+    "pveversion",
+    "pveversion *",
     "uname*",
     "cat /proc/cpuinfo",
     "cat /proc/meminfo",
     "cat /etc/os-release",
-    "ip addr*",
-    "ip -br addr*",
-    "ip route*",
+    "ip addr",
+    "ip addr show*",
+    "ip -br addr",
+    "ip -br addr show*",
+    "ip route",
+    "ip route show*",
 ]
 
 ALLOWED_PIPELINE_FILTERS = {
@@ -77,6 +94,99 @@ FORBIDDEN_OPERATORS = {
     ">&",
     "<&",
     "|&",
+}
+
+FORBIDDEN_ARGUMENTS: Dict[str, Set[str]] = {
+    "journalctl": {
+        "--vacuum-size",
+        "--vacuum-time",
+        "--vacuum-files",
+        "--rotate",
+        "--flush",
+        "--relinquish-var",
+        "--smart-relinquish-var",
+    },
+    "ip": {"add", "del", "delete", "flush", "change", "replace", "set", "link-netnsid"},
+    "smartctl": {"-s", "--smart=", "-o", "--offline=", "-T", "--tolerance="},
+    "sensors": {"-s", "--set"},
+    "systemctl": {
+        "start",
+        "stop",
+        "restart",
+        "reload",
+        "kill",
+        "mask",
+        "unmask",
+        "enable",
+        "disable",
+        "edit",
+        "revert",
+        "reset-failed",
+    },
+    "docker": {
+        "run",
+        "create",
+        "rm",
+        "kill",
+        "stop",
+        "restart",
+        "pause",
+        "unpause",
+        "exec",
+        "build",
+        "pull",
+        "push",
+        "commit",
+    },
+    "zpool": {
+        "create",
+        "destroy",
+        "add",
+        "attach",
+        "detach",
+        "replace",
+        "remove",
+        "offline",
+        "online",
+        "clear",
+        "reguid",
+        "reopen",
+        "set",
+        "trim",
+        "scrub",
+    },
+}
+
+DISALLOWED_PATTERN_BINARIES = {
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "python",
+    "python3",
+    "perl",
+    "ruby",
+    "rm",
+    "dd",
+    "mkfs",
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "ssh",
+    "scp",
+    "rsync",
+    "chmod",
+    "chown",
+    "mv",
+    "cp",
+    "kill",
+    "killall",
+    "pkill",
+    "sudo",
+    "su",
 }
 
 
@@ -147,9 +257,7 @@ def is_command_allowed(
                 False,
                 f"Piping to '{filter_cmd}' is forbidden; only safe filters are permitted ({', '.join(sorted(ALLOWED_PIPELINE_FILTERS))})",
             )
-        # Additional sanity checks on filter commands
         if filter_cmd == "awk":
-            # Disallow awk system() or print to files
             joined_awk = " ".join(seg)
             if "system(" in joined_awk or "getline" in joined_awk or ">" in joined_awk:
                 return False, "Forbidden function or redirection in awk command"
@@ -162,8 +270,18 @@ def is_command_allowed(
         if not primary_tokens:
             return False, "Command cannot be only 'sudo'"
 
+    base_cmd = Path(primary_tokens[0].strip("\"'")).name
+
+    # Check for forbidden mutating arguments on known commands
+    if base_cmd in FORBIDDEN_ARGUMENTS:
+        forbidden_set = FORBIDDEN_ARGUMENTS[base_cmd]
+        for tok in primary_tokens[1:]:
+            cleaned_tok = tok.strip("\"'")
+            for bad in forbidden_set:
+                if cleaned_tok == bad or (bad.endswith("=") and cleaned_tok.startswith(bad)):
+                    return False, f"Forbidden mutating argument '{cleaned_tok}' on command '{base_cmd}'"
+
     # Reconstruct the primary command without outer pipeline
-    # We join tokens, removing outer quotes if they were added by the lexer
     primary_cmd_str = " ".join(primary_tokens)
 
     # Build active allowlist
@@ -171,12 +289,61 @@ def is_command_allowed(
 
     for pattern in allowlist_patterns:
         pat = pattern.strip()
-        # Direct glob match against primary reconstructed command
         if fnmatch.fnmatch(primary_cmd_str, pat):
             return True, f"Matched allowlist pattern: {pat}"
-        # Also check with quotes stripped or normalised spacing
         normalized_str = re.sub(r"\s+", " ", primary_cmd_str).strip()
         if fnmatch.fnmatch(normalized_str, pat):
             return True, f"Matched allowlist pattern: {pat}"
+        if pat.endswith(" *") and (primary_cmd_str == pat[:-2] or normalized_str == pat[:-2]):
+            return True, f"Matched allowlist pattern: {pat}"
 
     return False, f"Command '{primary_cmd_str}' is not in the read-only allowlist"
+
+
+def validate_proposed_pattern(pattern: str) -> Tuple[bool, str]:
+    """Validate that a proposed allowlist pattern meets strict safety criteria.
+
+    Rules:
+    1. Must not contain shell operators (; & | > < $ ` etc.).
+    2. At most one wildcard '*' allowed, and if present it must be at the very end.
+    3. Must have a fixed base command and subcommand (minimum 2 tokens before any '*').
+       Example: 'snapraid status*' is VALID; 'snapraid*' is INVALID (too broad).
+    4. Base binary must not be an interpreter, shell, or destructive command.
+    """
+    pat = pattern.strip()
+    if not pat:
+        return False, "Pattern cannot be empty"
+
+    for op in (";", "&&", "||", "&", ">", "<", "`", "$", "|"):
+        if op in pat:
+            return False, f"Pattern contains forbidden shell operator '{op}'"
+
+    star_count = pat.count("*")
+    if star_count > 1:
+        return False, "Pattern can contain at most one wildcard '*'"
+    if star_count == 1 and not pat.endswith("*"):
+        return False, "Wildcard '*' is only permitted at the very end of the pattern"
+
+    # Tokenize pattern base (without trailing *)
+    cleaned = pat[:-1].strip() if pat.endswith("*") else pat
+    parts = cleaned.split()
+    if not parts:
+        return False, "Pattern has no command tokens"
+
+    base_bin = Path(parts[0]).name.lower()
+    if base_bin in DISALLOWED_PATTERN_BINARIES:
+        return False, f"Command '{base_bin}' cannot be added to allowlist (interpreter/destructive binary)"
+
+    # Reject forbidden mutating arguments for known commands
+    if base_bin in FORBIDDEN_ARGUMENTS:
+        for p in parts[1:]:
+            cleaned_p = p.strip("\"'")
+            for bad in FORBIDDEN_ARGUMENTS[base_bin]:
+                if cleaned_p == bad or (bad.endswith("=") and cleaned_p.startswith(bad)):
+                    return False, f"Pattern contains forbidden mutating argument '{cleaned_p}' for '{base_bin}'"
+
+    # Require at least 2 tokens before wildcard for compound tools (unless single tool is exact match)
+    if star_count > 0 and len(parts) < 2:
+        return False, f"Pattern '{pattern}' is too broad; must include a specific subcommand (e.g. '{base_bin} status*')"
+
+    return True, "Valid pattern"

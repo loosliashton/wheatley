@@ -78,3 +78,71 @@ async def test_run_guest_command_blocked_produces_proposal(mock_agent):
     assert "proposal" in result
     assert result["proposal"]["target"] == "cave/100"
     mock_agent.shell.execute_in_guest.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_target_allowlist_permits_command(mock_agent):
+    mock_agent.shell.execute_in_guest = AsyncMock(
+        return_value=ShellResult(
+            command="snapraid status", exit_code=0, stdout="Everything OK", stderr="", timed_out=False
+        )
+    )
+
+    # 1. First attempt on cave/101 is blocked because snapraid is not in DEFAULT_ALLOWLIST
+    res1 = await mock_agent._tool_run_guest_command("cave", 101, "snapraid status")
+    assert res1["status"] == "REQUIRES_APPROVAL"
+    prop_id = res1["proposal_id"]
+
+    # 2. User approves with ALLOW_ALWAYS on cave/101
+    ok, msg = mock_agent.approvals.resolve_proposal(prop_id, "ALLOW_ALWAYS", user_id=123)
+    assert ok is True
+
+    # 3. Second attempt on cave/101 now executes!
+    res2 = await mock_agent._tool_run_guest_command("cave", 101, "snapraid status")
+    assert res2["status"] == "SUCCESS"
+    assert res2["stdout"] == "Everything OK"
+
+    # 4. Same command on cave/102 is still blocked (target scoped)
+    res3 = await mock_agent._tool_run_guest_command("cave", 102, "snapraid status")
+    assert res3["status"] == "REQUIRES_APPROVAL"
+
+
+@pytest.mark.asyncio
+async def test_turn_limit_graceful_synthesis(mock_agent):
+    from wheatley.llm.base import LLMResponse, ToolCall
+
+    mock_agent.config.llm.max_tool_iterations = 2
+    mock_agent.config.llm.provider = "mock"
+
+    call_count = 0
+
+    async def mock_generate(messages, tools, system_instruction):
+        nonlocal call_count
+        call_count += 1
+        if tools:  # inside loop
+            return LLMResponse(
+                content=None,
+                tool_calls=[ToolCall(id=f"c_{call_count}", name="get_recent_audit_logs", arguments={"limit": 1})],
+                input_tokens=100,
+                output_tokens=50,
+            )
+        else:  # synthesis call with tools=[]
+            return LLMResponse(
+                content="Synthesized final report: telemetry is normal and cluster is healthy.",
+                tool_calls=[],
+                input_tokens=200,
+                output_tokens=100,
+            )
+
+    from wheatley.llm.base import BaseLLMProvider
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.model_name = "mock-model"
+    mock_provider.provider_name = "mock"
+    mock_provider.generate_response = AsyncMock(side_effect=mock_generate)
+    mock_agent.provider = mock_provider
+
+    answer = await mock_agent.chat("System status overview?")
+    assert "Synthesized final report" in answer
+    assert "Diagnostic tool budget reached; synthesized from gathered observations" in answer
+    assert call_count == 3  # 2 iteration loop calls + 1 synthesis call

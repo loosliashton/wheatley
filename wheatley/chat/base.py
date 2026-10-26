@@ -32,8 +32,11 @@ class ChatInterface(ABC):
         command: str,
         target: str,
         risk: str,
+        proposal_type: str = "ACTION",
+        pattern: Optional[str] = None,
+        chat_id: Optional[int] = None,
     ) -> Any:
-        """Send an interactive action proposal with Approve / Deny buttons."""
+        """Send an interactive action or allowlist proposal with buttons."""
         pass
 
     @abstractmethod

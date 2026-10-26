@@ -9,6 +9,7 @@ import signal
 import sys
 from pathlib import Path
 
+from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
@@ -39,6 +40,7 @@ class WheatleyApp:
         self.usage = UsageTracker(self.audit)
         self.budget = self.usage  # Backwards compatibility alias
         self.memory = ConversationStore(self.audit.db_path)
+        self.approvals = ApprovalStore(self.audit.db_path)
         self.bot: TelegramBot | None = None
         self.check_engine: CheckEngine | None = None
         self.llm_agent: LLMAgent | None = None
@@ -131,6 +133,7 @@ class WheatleyApp:
                 audit=self.audit,
                 status_provider=self.get_status_overview,
                 discovery_provider=self.run_discovery_summary,
+                approvals=self.approvals,
             )
 
         alert_sink = self.bot.send_alert if self.bot else None
@@ -152,6 +155,7 @@ class WheatleyApp:
             check_engine=self.check_engine,
             proxmox_clients=self.check_engine.clients,
             memory=self.memory,
+            approvals=self.approvals,
         )
         self.gemini_agent = self.llm_agent  # Backwards compatibility
 
@@ -161,6 +165,22 @@ class WheatleyApp:
             self.bot.llm_agent = self.llm_agent
             self.bot.gemini_agent = self.llm_agent
             self.bot.budget = self.usage
+            self.bot.shell = self.check_engine.shell
+            self.bot.approvals = self.approvals
+
+            # Wire LLMAgent proposal sink so interactive buttons are sent to Telegram
+            async def _on_proposal(p: Any) -> None:
+                await self.bot.send_proposal(
+                    proposal_id=p.id,
+                    summary=p.summary,
+                    command=p.command,
+                    target=p.target,
+                    risk=p.risk,
+                    proposal_type=p.proposal_type,
+                    pattern=p.pattern,
+                )
+
+            self.llm_agent.proposal_sink = _on_proposal
 
         # 4. Health probes (for external watchdogs)
         engine = self.check_engine

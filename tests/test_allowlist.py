@@ -134,7 +134,7 @@ def test_non_allowlisted_commands_rejected():
     for cmd in non_allowlisted:
         ok, reason = is_command_allowed(cmd)
         assert not ok, f"Command '{cmd}' should not be in allowlist"
-        assert "not in the read-only allowlist" in reason
+        assert "not in the read-only allowlist" in reason or "mutating" in reason.lower()
 
 
 def test_custom_allowlist():
@@ -142,3 +142,59 @@ def test_custom_allowlist():
     assert is_command_allowed("custom_diagnostics --all", custom)[0]
     assert is_command_allowed("my_tool --check", custom)[0]
     assert not is_command_allowed("uptime", custom)[0]
+
+
+def test_forbidden_mutating_arguments():
+    mutating_commands = [
+        "journalctl --vacuum-time=2d",
+        "journalctl --vacuum-size=1G",
+        "ip route add 10.0.0.0/24 via 192.168.1.1",
+        "ip addr del 192.168.1.50/24 dev eth0",
+        "smartctl -s off /dev/sda",
+        "smartctl --smart=off /dev/sda",
+        "sensors -s",
+        "systemctl start frigate",
+        "systemctl stop frigate",
+        "docker run -d nginx",
+        "docker rm frigate",
+        "docker restart plex",
+        "zpool create testpool /dev/sdb",
+        "zpool destroy testpool",
+    ]
+    for cmd in mutating_commands:
+        ok, reason = is_command_allowed(cmd)
+        assert not ok, f"Mutating command '{cmd}' must be rejected!"
+        assert "mutating" in reason.lower() or "not in the read-only allowlist" in reason.lower()
+
+
+def test_validate_proposed_pattern():
+    from wheatley.tools.allowlist import validate_proposed_pattern
+
+    valid_patterns = [
+        "smartctl -a *",
+        "smartctl --scan",
+        "snapraid status",
+        "snapraid status *",
+        "systemctl list-timers",
+        "docker inspect *",
+    ]
+    for pat in valid_patterns:
+        ok, reason = validate_proposed_pattern(pat)
+        assert ok, f"Pattern '{pat}' should be valid, got: {reason}"
+
+    invalid_patterns = [
+        "",
+        "rm -rf *",
+        "dd if=* of=*",
+        "chmod 777 *",
+        "reboot *",
+        "systemctl restart *",
+        "docker run *",
+        "cat *",  # binary without subcommand + wildcard
+        "smartctl *",  # binary without subcommand + wildcard
+        "smartctl -a * *",  # multiple wildcards
+        "smartctl -a *; rm -rf /",  # operator
+    ]
+    for pat in invalid_patterns:
+        ok, reason = validate_proposed_pattern(pat)
+        assert not ok, f"Pattern '{pat}' must be rejected!"

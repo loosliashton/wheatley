@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
 )
 
+from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
 from wheatley.chat.base import ChatInterface
 from wheatley.chat.formatter import (
@@ -25,6 +26,7 @@ from wheatley.chat.formatter import (
     split_telegram_message,
 )
 from wheatley.config import TelegramConfig
+from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.chat.telegram")
 
@@ -81,6 +83,9 @@ class TelegramBot(ChatInterface):
         gemini_agent: Optional[Any] = None,
         llm_agent: Optional[Any] = None,
         budget: Optional[Any] = None,
+        shell: Optional[ShellExecutor] = None,
+        approvals: Optional[ApprovalStore] = None,
+        **kwargs: Any,
     ):
         self.config = config
         self.audit = audit
@@ -89,6 +94,13 @@ class TelegramBot(ChatInterface):
         self.check_engine = check_engine
         self.agent = llm_agent or gemini_agent
         self.budget = budget
+        self.shell = shell or getattr(self.agent, "shell", None)
+        self.approvals = (
+            approvals
+            or kwargs.get("approvals")
+            or getattr(self.agent, "approvals", None)
+            or ApprovalStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
+        )
         self.allowed_users: Set[int] = set(config.allowed_user_ids)
         self.primary_chat_id: Optional[int] = config.allowed_user_ids[0] if config.allowed_user_ids else None
         self.app: Application = ApplicationBuilder().token(config.bot_token).build()
@@ -137,6 +149,7 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("unmute", self._cmd_unmute))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage))
         self.app.add_handler(CommandHandler("investigate", self._cmd_investigate))
+        self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
         self.app.add_handler(CommandHandler("reset", self._cmd_reset))
@@ -223,6 +236,7 @@ class TelegramBot(ChatInterface):
             f"• `/status` - Check node and service health\n"
             f"• `/checks` - View all active checks & mute states\n"
             f"• `/usage` - View LLM token spend & activity\n"
+            f"• `/allowlist` - Manage learned command allowlist rules\n"
             f"• `/discover` - Auto-detect services & containers\n"
             f"• `/audit` - Inspect recent action logs\n"
             f"• `/reset` - Clear conversation history & memory\n"
@@ -241,6 +255,7 @@ class TelegramBot(ChatInterface):
             "/checks - View all health checks and mute status\n"
             "/usage - LLM token consumption & activity\n"
             "/investigate <id> - Run AI diagnosis on a service\n"
+            "/allowlist - View or revoke learned allowlist rules\n"
             "/mute <id> [mins] - Silence alerts for a check\n"
             "/unmute <id> - Re-enable alerts for a check\n"
             "/discover - Probe nodes & guests to discover active services\n"
@@ -447,6 +462,73 @@ class TelegramBot(ChatInterface):
             )
         await self._send_or_reply(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", target=update.message)
 
+    async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        args = context.args or []
+        if not args:
+            rules = self.approvals.list_user_rules()
+            if not rules:
+                await self._send_or_reply(
+                    "🛡 *Active User Allowlist Rules*\n\n"
+                    "No custom allowlist rules configured.\n"
+                    "Commands requested during chat or diagnostics can be approved to Run Once or permanently added here.",
+                    target=update.message,
+                )
+                return
+
+            lines = [f"🛡 *Active User Allowlist Rules ({len(rules)})*\n"]
+            for r in rules:
+                created = r.created_at.strftime("%Y-%m-%d %H:%M")
+                lines.append(f"• *#{r.id}* on `{r.target}`: `{r.pattern}`\n  _Added {created}_")
+            lines.append("\n_To remove a rule: `/allowlist revoke <id>`_")
+            await self._send_or_reply("\n".join(lines), target=update.message)
+            return
+
+        subcmd = args[0].lower()
+        if subcmd == "revoke" and len(args) > 1:
+            try:
+                rule_id = int(args[1])
+            except ValueError:
+                await self._send_or_reply("❌ Rule ID must be an integer, e.g. `/allowlist revoke 1`", target=update.message)
+                return
+
+            if self.approvals.revoke_user_rule(rule_id):
+                self.audit.log_event("ALLOWLIST", f"tg:{update.effective_user.id}", f"revoke:{rule_id}", "REVOKED")
+                await self._send_or_reply(f"✅ *Revoked allowlist rule #{rule_id}.*", target=update.message)
+            else:
+                await self._send_or_reply(f"❌ Allowlist rule #{rule_id} not found.", target=update.message)
+        else:
+            await self._send_or_reply("⚠️ *Usage:* `/allowlist` (list rules) or `/allowlist revoke <id>` (remove rule)", target=update.message)
+
+    async def _execute_proposal_command(self, prop: Any) -> str:
+        if not prop:
+            return "❌ Proposal details not found."
+        executor = self.shell or (getattr(self.agent, "shell", None) if self.agent else None)
+        if not executor:
+            return "⚠️ Shell executor not available on bot."
+
+        target = prop.target.strip()
+        command = prop.command.strip()
+        try:
+            if "/" in target:
+                parts = target.split("/", 1)
+                node = parts[0]
+                vmid = int(parts[1])
+                res = await executor.execute_in_guest(node, vmid, command, timeout=30)
+            else:
+                res = await executor.execute_on_host(target, command, timeout=30)
+
+            status_icon = "🟢" if res.success else "🔴"
+            output = res.stdout.strip() or res.stderr.strip() or "(no output)"
+            return (
+                f"{status_icon} *Output on `{target}` (exit code {res.exit_code}):*\n"
+                f"```bash\n{output}\n```"
+            )
+        except Exception as e:
+            logger.exception("Failed to execute proposal command: %s", e)
+            return f"❌ *Execution error on `{target}`:* `{e}`"
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not self._is_authorized(update):
@@ -456,16 +538,65 @@ class TelegramBot(ChatInterface):
         data = query.data or ""
         user_id = update.effective_user.id
 
-        if data.startswith("approve:"):
+        if data.startswith("allow_once:"):
             proposal_id = data.split(":", 1)[1]
+            success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ONCE", user_id)
+            if not success:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await self._send_or_reply(f"❌ *Could not execute:* {msg}", target=query.message)
+                return
+
+            prop = self.approvals.get_proposal(proposal_id)
+            self.audit.log_event("ALLOWLIST", f"tg:{user_id}", f"allow_once:{proposal_id}", "APPROVED", details={"cmd": prop.command if prop else ""})
+            await query.edit_message_reply_markup(reply_markup=None)
+            await self._send_or_reply(f"⚡ *Executing once on `{prop.target if prop else 'target'}`...*", target=query.message)
+            async with TypingIndicator(query.message.chat if query.message else None):
+                res = await self._execute_proposal_command(prop)
+            self.approvals.record_execution(proposal_id, res[:500])
+            await self._send_or_reply(res, target=query.message)
+
+        elif data.startswith("allow_always:"):
+            proposal_id = data.split(":", 1)[1]
+            success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ALWAYS", user_id)
+            if not success:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await self._send_or_reply(f"❌ *Could not save rule:* {msg}", target=query.message)
+                return
+
+            prop = self.approvals.get_proposal(proposal_id)
+            self.audit.log_event("ALLOWLIST", f"tg:{user_id}", f"allow_always:{proposal_id}", "ADDED", details={"pattern": prop.pattern if prop else "", "target": prop.target if prop else ""})
+            await query.edit_message_reply_markup(reply_markup=None)
+            target_str = prop.target if prop else "target"
+            pattern_str = prop.pattern if prop else "rule"
+            await self._send_or_reply(f"🛡 *Added rule `{pattern_str}` to allowlist for `{target_str}`.*\nExecuting command now...", target=query.message)
+            async with TypingIndicator(query.message.chat if query.message else None):
+                res = await self._execute_proposal_command(prop)
+            self.approvals.record_execution(proposal_id, res[:500])
+            await self._send_or_reply(res, target=query.message)
+
+        elif data.startswith("approve:"):
+            proposal_id = data.split(":", 1)[1]
+            success, msg = self.approvals.resolve_proposal(proposal_id, "APPROVE", user_id)
+            if not success:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await self._send_or_reply(f"❌ *Approval failed:* {msg}", target=query.message)
+                return
+
+            prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"approve:{proposal_id}", "APPROVED")
             await query.edit_message_reply_markup(reply_markup=None)
             await self._send_or_reply(f"✅ *Proposal {proposal_id} approved.* Executing...", target=query.message)
+            if prop:
+                async with TypingIndicator(query.message.chat if query.message else None):
+                    res = await self._execute_proposal_command(prop)
+                self.approvals.record_execution(proposal_id, res[:500])
+                await self._send_or_reply(res, target=query.message)
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, True, user_id)
 
         elif data.startswith("deny:"):
             proposal_id = data.split(":", 1)[1]
+            self.approvals.resolve_proposal(proposal_id, "DENY", user_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"deny:{proposal_id}", "DENIED")
             await query.edit_message_reply_markup(reply_markup=None)
             await self._send_or_reply(f"❌ *Proposal {proposal_id} denied.*", target=query.message)
@@ -558,29 +689,53 @@ class TelegramBot(ChatInterface):
         command: str,
         target: str,
         risk: str,
+        proposal_type: str = "ACTION",
+        pattern: Optional[str] = None,
+        chat_id: Optional[int] = None,
     ) -> Any:
-        if not self.primary_chat_id:
+        cid = chat_id or self.primary_chat_id
+        if not cid:
             return None
 
-        keyboard = InlineKeyboardMarkup(
-            [
+        if proposal_type == "ALLOWLIST_RULE":
+            keyboard = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton("✅ Approve", callback_data=f"approve:{proposal_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
+                    [
+                        InlineKeyboardButton("⚡ Run Once", callback_data=f"allow_once:{proposal_id}"),
+                        InlineKeyboardButton(f"🛡 Always Allow on {target}", callback_data=f"allow_always:{proposal_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
+                    ],
                 ]
-            ]
-        )
+            )
+            msg = (
+                f"🛡 *COMMAND ALLOWLIST PROPOSAL*\n\n"
+                f"*Target:* `{target}`\n"
+                f"*Command to execute:*\n```bash\n{command}\n```\n"
+                f"*Suggested Rule:* `{pattern or command}`\n"
+                f"*Summary:* {summary}\n\n"
+                f"Select an option to proceed:"
+            )
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"approve:{proposal_id}"),
+                        InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
+                    ]
+                ]
+            )
+            msg = (
+                f"⚠️ *ACTION PROPOSAL REQUIRED*\n\n"
+                f"*Target:* `{target}`\n"
+                f"*Risk Level:* `{risk}`\n"
+                f"*Summary:* {summary}\n\n"
+                f"*Command to execute:*\n```bash\n{command}\n```\n\n"
+                f"Tap Approve to execute, or Deny to reject."
+            )
 
-        msg = (
-            f"⚠️ *ACTION PROPOSAL REQUIRED*\n\n"
-            f"*Target:* `{target}`\n"
-            f"*Risk Level:* `{risk}`\n"
-            f"*Summary:* {summary}\n\n"
-            f"*Command to execute:*\n```bash\n{command}\n```\n\n"
-            f"Tap Approve to execute on host, or Deny to reject."
-        )
-
-        res = await self._send_or_reply(msg, chat_id=self.primary_chat_id, reply_markup=keyboard)
+        res = await self._send_or_reply(msg, chat_id=cid, reply_markup=keyboard)
         return res[0] if res else None
 
     def set_command_handler(

@@ -45,12 +45,15 @@ class AuditLogger:
                 """
                 CREATE TABLE IF NOT EXISTS proposals (
                     id TEXT PRIMARY KEY,
-                    hash TEXT NOT NULL,
+                    proposal_type TEXT NOT NULL DEFAULT 'ACTION',
+                    hash TEXT,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
                     target TEXT NOT NULL,
                     command TEXT NOT NULL,
+                    pattern TEXT,
                     reason TEXT,
+                    summary TEXT,
                     risk TEXT NOT NULL,
                     status TEXT NOT NULL,
                     executed_at REAL,

@@ -452,6 +452,80 @@ async def test_chat_multi_turn_context_retention(test_env, tmp_path):
     assert captured_messages[2][0].content == "Hello fresh turn"
 
 
+def test_conversation_store_session_timeout(tmp_path):
+    import time
+    from wheatley.llm.memory import ConversationStore
+    db_file = str(tmp_path / "timeout_test.db")
+    store = ConversationStore(db_file)
+
+    now = time.time()
+    two_hours_ago = now - 7200
+    one_hour_59_ago = now - 7140
+
+    # Past session (2 hours ago)
+    store.add_message("chat_timeout", "user", "Old query 2 hours ago", created_at=two_hours_ago)
+    store.add_message("chat_timeout", "assistant", "Old answer 2 hours ago", created_at=one_hour_59_ago)
+
+    # Calling with 60-minute timeout should treat the 2-hour-old session as expired
+    expired_history = store.get_history("chat_timeout", max_turns=5, session_timeout_minutes=60)
+    assert expired_history == []
+
+    # Calling with timeout=0 (disabled) should return the full history
+    full_history = store.get_history("chat_timeout", max_turns=5, session_timeout_minutes=0)
+    assert len(full_history) == 2
+    assert full_history[0].content == "Old query 2 hours ago"
+
+    # Now add new session messages (5 minutes ago and 1 minute ago)
+    five_min_ago = now - 300
+    one_min_ago = now - 60
+    store.add_message("chat_timeout", "user", "Fresh query", created_at=five_min_ago)
+    store.add_message("chat_timeout", "assistant", "Fresh answer", created_at=one_min_ago)
+
+    # Calling with 60-minute timeout should only include the fresh session!
+    active_history = store.get_history("chat_timeout", max_turns=5, session_timeout_minutes=60)
+    assert len(active_history) == 2
+    assert active_history[0].content == "Fresh query"
+    assert active_history[1].content == "Fresh answer"
+
+
+@pytest.mark.asyncio
+async def test_chat_session_timeout_auto_reset(test_env, tmp_path):
+    import time
+    from wheatley.llm.memory import ConversationStore
+    cfg, audit, usage, clients, check_engine = test_env
+    cfg.llm.session_timeout_minutes = 60
+    mem_db = str(tmp_path / "agent_timeout_memory.db")
+    store = ConversationStore(mem_db)
+
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "mock"
+    mock_provider.model_name = "mock-model"
+
+    captured_messages = []
+    async def mock_generate(messages, tools, system_instruction):
+        captured_messages.append(list(messages))
+        return LLMResponse(content=f"Answer: {messages[-1].content}")
+
+    mock_provider.generate_response = AsyncMock(side_effect=mock_generate)
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage, memory=store)
+
+    # Turn 1
+    await agent.chat("First question", chat_id="idle_user")
+    assert len(captured_messages[0]) == 1
+
+    # Simulate 2 hours of idle time by updating created_at on all messages in DB
+    two_hours_ago = time.time() - 7200
+    with store._get_conn() as conn:
+        conn.execute("UPDATE conversations SET created_at = ?", (two_hours_ago,))
+        conn.commit()
+
+    # Turn 2: since >60 minutes have elapsed, history should auto-reset!
+    await agent.chat("Second question hours later", chat_id="idle_user")
+    assert len(captured_messages[1]) == 1
+    assert captured_messages[1][0].content == "Second question hours later"
+
+
 def test_tool_result_truncation(test_env):
     cfg, audit, usage, clients, check_engine = test_env
     cfg.llm.max_tool_result_chars = 100

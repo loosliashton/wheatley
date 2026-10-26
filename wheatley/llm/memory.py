@@ -58,10 +58,11 @@ class ConversationStore:
         role: str,
         content: str,
         tool_calls: Optional[List[ToolCall | Dict[str, Any]]] = None,
+        created_at: Optional[float] = None,
     ) -> None:
         """Persist a single chat turn (user, assistant, or tool) for a chat_id."""
-        now_ts = time.time()
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_ts = created_at if created_at is not None else time.time()
+        now_iso = datetime.fromtimestamp(now_ts, timezone.utc).isoformat()
 
         tc_json = None
         if tool_calls:
@@ -86,11 +87,18 @@ class ConversationStore:
         except Exception as e:
             logger.warning("Failed to save conversation message: %s", e)
 
-    def get_history(self, chat_id: str, max_turns: int = 10) -> List[LLMMessage]:
+    def get_history(
+        self,
+        chat_id: str,
+        max_turns: int = 10,
+        session_timeout_minutes: int = 0,
+    ) -> List[LLMMessage]:
         """Fetch recent conversation turns for chat_id in chronological order.
 
         A turn represents a user interaction and assistant response.
         Ensures the returned message list begins cleanly with a 'user' message.
+        If session_timeout_minutes > 0, turns separated by an inactivity gap greater
+        than the timeout (or if the last turn is older than the timeout) are pruned.
         """
         # Fetch up to 2 * max_turns messages (user + assistant pairs)
         limit_messages = max(max_turns * 2, 4)
@@ -99,7 +107,7 @@ class ConversationStore:
             with self._get_conn() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT role, content, tool_calls
+                    SELECT role, content, tool_calls, created_at
                     FROM conversations
                     WHERE chat_id = ?
                     ORDER BY id DESC
@@ -115,7 +123,24 @@ class ConversationStore:
         if not rows:
             return []
 
+        # If session timeout is active, prune idle sessions
+        if session_timeout_minutes > 0:
+            timeout_seconds = session_timeout_minutes * 60
+            now_ts = time.time()
+            # If the latest message was sent longer ago than the timeout, the session is expired
+            if (now_ts - rows[0]["created_at"]) > timeout_seconds:
+                return []
+
+            # Check consecutive messages (newest to oldest) for an idle gap
+            valid_count = len(rows)
+            for i in range(len(rows) - 1):
+                if (rows[i]["created_at"] - rows[i + 1]["created_at"]) > timeout_seconds:
+                    valid_count = i + 1
+                    break
+            rows = rows[:valid_count]
+
         # Rows are in reverse order (newest first). Reverse to chronological order.
+        rows = list(rows)
         rows.reverse()
 
         messages: List[LLMMessage] = []

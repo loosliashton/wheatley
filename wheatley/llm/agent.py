@@ -665,9 +665,14 @@ class LLMAgent:
 
             # Load recent conversational history up to history_turns
             max_turns = getattr(self.config.llm, "history_turns", 10)
+            session_timeout = getattr(self.config.llm, "session_timeout_minutes", 60)
             history: List[LLMMessage] = []
             if max_turns > 0:
-                history = self.memory.get_history(chat_id=chat_id, max_turns=max_turns)
+                history = self.memory.get_history(
+                    chat_id=chat_id,
+                    max_turns=max_turns,
+                    session_timeout_minutes=session_timeout,
+                )
 
             # Build initial message chain
             current_user_msg = LLMMessage(role="user", content=user_content)

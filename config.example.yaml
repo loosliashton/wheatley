@@ -49,6 +49,8 @@ llm:
   # api_base: "http://localhost:11434/v1" # Base URL (defaults to localhost:11434/v1 for ollama)
   temperature: 0.2
   max_tool_iterations: 10
+  history_turns: 10
+  session_timeout_minutes: 60      # Auto-reset conversation context after 60 mins of inactivity (0 to disable)
 
 # Chat Interfaces
 chat:

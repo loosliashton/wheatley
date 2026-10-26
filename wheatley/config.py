@@ -66,6 +66,10 @@ class LLMConfig(BaseModel):
     max_tool_iterations: int = Field(10, description="Max function-calling reasoning turns")
     history_turns: int = Field(10, description="Recent conversation turns retained in memory for context")
     history_retention_days: int = Field(30, description="Days to retain conversation history in SQLite")
+    session_timeout_minutes: int = Field(
+        60,
+        description="Inactivity timeout in minutes after which conversation context auto-resets (0 to disable)",
+    )
     max_tool_result_chars: int = Field(4000, description="Max characters for a single tool result before truncation")
 
 

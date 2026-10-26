@@ -171,3 +171,58 @@ async def test_callback_resumes_agent_with_output(mock_bot):
     # Verify the agent's interpretation was sent to user
     sent_messages = [call[0][0] for call in mock_bot._send_or_reply.call_args_list]
     assert any("Based on the timer output" in m for m in sent_messages)
+
+
+@pytest.mark.asyncio
+async def test_proposals_dispatched_after_llm_message(mock_bot):
+    """Ensure proposals are delivered strictly after the LLM explanation message."""
+    delivery_order = []
+
+    async def mock_send_or_reply(text_or_msg, **kwargs):
+        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+            delivery_order.append(("proposal_card", text_or_msg))
+        else:
+            delivery_order.append(("agent_message", text_or_msg))
+        return [MagicMock()]
+
+    mock_bot._send_or_reply = AsyncMock(side_effect=mock_send_or_reply)
+
+    # Create dummy proposal
+    prop = mock_bot.approvals.create_proposal(
+        proposal_type="ACTION",
+        target="doug/200",
+        command="pct restart 200",
+        summary="Restart homeassistant",
+        risk="MEDIUM",
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.is_configured = True
+
+    # When chat() is called, it simulates the LLM setting a pending proposal
+    async def mock_chat(prompt, chat_id="default"):
+        return "I prepared an action to restart container 200. Please review and confirm below."
+
+    mock_agent.chat = AsyncMock(side_effect=mock_chat)
+    mock_agent.drain_pending_proposals = MagicMock(return_value=[prop])
+    mock_bot.agent = mock_agent
+
+    update = MagicMock(spec=Update)
+    update.message = MagicMock(spec=Message)
+    update.message.text = "Restart homeassistant please"
+    update.effective_user = MagicMock(spec=User)
+    update.effective_user.id = 12345
+    update.effective_chat = MagicMock(spec=Chat)
+    update.effective_chat.id = 12345
+
+    context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+
+    await mock_bot._handle_text(update, context)
+
+    # Assert exact ordering: agent_message FIRST, proposal_card SECOND
+    assert len(delivery_order) == 2
+    assert delivery_order[0][0] == "agent_message"
+    assert "Please review and confirm below" in delivery_order[0][1]
+    assert delivery_order[1][0] == "proposal_card"
+    assert "ACTION PROPOSAL REQUIRED" in delivery_order[1][1]
+

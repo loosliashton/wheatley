@@ -461,6 +461,8 @@ class TelegramBot(ChatInterface):
                 chat_id=chat_id,
             )
         await self._send_or_reply(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", target=update.message)
+        target_cid = update.effective_chat.id if update.effective_chat else None
+        await self._dispatch_agent_proposals(chat_id=target_cid)
 
     async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -570,6 +572,8 @@ class TelegramBot(ChatInterface):
                     async with TypingIndicator(query.message.chat if query.message else None):
                         followup = await self.agent.chat(continuation, chat_id=chat_id)
                     await self._send_or_reply(followup, target=query.message)
+                    target_cid = query.message.chat_id if query.message else None
+                    await self._dispatch_agent_proposals(chat_id=target_cid)
                     agent_resumed = True
                 except Exception as e:
                     logger.exception("Agent failed to synthesize proposal continuation: %s", e)
@@ -608,6 +612,8 @@ class TelegramBot(ChatInterface):
                     async with TypingIndicator(query.message.chat if query.message else None):
                         followup = await self.agent.chat(continuation, chat_id=chat_id)
                     await self._send_or_reply(followup, target=query.message)
+                    target_cid = query.message.chat_id if query.message else None
+                    await self._dispatch_agent_proposals(chat_id=target_cid)
                     agent_resumed = True
                 except Exception as e:
                     logger.exception("Agent failed to synthesize proposal continuation: %s", e)
@@ -644,6 +650,8 @@ class TelegramBot(ChatInterface):
                         async with TypingIndicator(query.message.chat if query.message else None):
                             followup = await self.agent.chat(continuation, chat_id=chat_id)
                         await self._send_or_reply(followup, target=query.message)
+                        target_cid = query.message.chat_id if query.message else None
+                        await self._dispatch_agent_proposals(chat_id=target_cid)
                         agent_resumed = True
                     except Exception as e:
                         logger.exception("Agent failed to synthesize proposal continuation: %s", e)
@@ -675,6 +683,8 @@ class TelegramBot(ChatInterface):
                     async with TypingIndicator(query.message.chat if query.message else None):
                         followup = await self.agent.chat(continuation, chat_id=chat_id)
                     await self._send_or_reply(followup, target=query.message)
+                    target_cid = query.message.chat_id if query.message else None
+                    await self._dispatch_agent_proposals(chat_id=target_cid)
                 except Exception as e:
                     logger.exception("Agent failed to handle denial continuation: %s", e)
 
@@ -711,6 +721,8 @@ class TelegramBot(ChatInterface):
                     f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
                     target=query.message,
                 )
+                target_cid = query.message.chat_id if query.message else None
+                await self._dispatch_agent_proposals(chat_id=target_cid)
             else:
                 await self._send_or_reply("⚠️ LLM agent is not configured.", target=query.message)
 
@@ -729,6 +741,8 @@ class TelegramBot(ChatInterface):
                 async with TypingIndicator(update.effective_chat):
                     response = await self.agent.chat(text, chat_id=chat_id)
                 await self._send_or_reply(response, target=update.message)
+                target_cid = update.effective_chat.id if update.effective_chat else None
+                await self._dispatch_agent_proposals(chat_id=target_cid)
             else:
                 await self._send_or_reply(
                     f"Received: \"{text}\"\n\n"
@@ -819,6 +833,23 @@ class TelegramBot(ChatInterface):
 
         res = await self._send_or_reply(msg, chat_id=cid, reply_markup=keyboard)
         return res[0] if res else None
+
+    async def _dispatch_agent_proposals(self, chat_id: Optional[int] = None) -> None:
+        """Deliver any deferred proposals directly after the agent's message."""
+        if not self.agent or not hasattr(self.agent, "drain_pending_proposals"):
+            return
+        proposals = self.agent.drain_pending_proposals()
+        for p in proposals:
+            await self.send_proposal(
+                proposal_id=p.id,
+                summary=p.summary,
+                command=p.command,
+                target=p.target,
+                risk=p.risk,
+                proposal_type=p.proposal_type,
+                pattern=p.pattern,
+                chat_id=chat_id,
+            )
 
     def set_command_handler(
         self, command: str, handler: Callable[..., Coroutine[Any, Any, None]]

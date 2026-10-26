@@ -58,6 +58,8 @@ class LLMAgent:
         # Approval & Dynamic Allowlist Store (SQLite-backed)
         self.approvals = kwargs.get("approvals") or ApprovalStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
         self.proposal_sink: Optional[Callable[[Any], Coroutine[Any, Any, None]]] = kwargs.get("proposal_sink")
+        self.pending_proposals: List[Any] = []
+        self._defer_proposals: bool = False
 
         # Usage tracker (records tokens without billing blocks/caps)
         if usage is not None:
@@ -333,6 +335,10 @@ class LLMAgent:
         }
 
     def _dispatch_proposal(self, prop: Any) -> None:
+        if self._defer_proposals:
+            self.pending_proposals.append(prop)
+            return
+
         if self.proposal_sink:
             try:
                 loop = asyncio.get_running_loop()
@@ -341,6 +347,12 @@ class LLMAgent:
                 pass
             except Exception as e:
                 logger.warning("Failed to dispatch proposal to sink: %s", e)
+
+    def drain_pending_proposals(self) -> List[Any]:
+        """Drain and return any proposals deferred during reasoning turns."""
+        props = list(self.pending_proposals)
+        self.pending_proposals.clear()
+        return props
 
     async def _tool_run_host_command(self, node: str, command: str) -> Dict[str, Any]:
         target = node
@@ -518,152 +530,157 @@ class LLMAgent:
                 "3. Restart Wheatley (`systemctl restart wheatley`)"
             )
 
-        user_content = prompt
-        if context_note:
-            user_content = f"Context: {context_note}\n\nQuestion: {prompt}"
-
-        # Clean up expired conversations in background
+        self.pending_proposals = []
+        self._defer_proposals = True
         try:
-            self.memory.cleanup_old_conversations(
-                retention_days=getattr(self.config.llm, "history_retention_days", 30)
-            )
-        except Exception:
-            pass
+            user_content = prompt
+            if context_note:
+                user_content = f"Context: {context_note}\n\nQuestion: {prompt}"
 
-        # Load recent conversational history up to history_turns
-        max_turns = getattr(self.config.llm, "history_turns", 10)
-        history: List[LLMMessage] = []
-        if max_turns > 0:
-            history = self.memory.get_history(chat_id=chat_id, max_turns=max_turns)
-
-        # Build initial message chain
-        current_user_msg = LLMMessage(role="user", content=user_content)
-        messages: List[LLMMessage] = list(history) + [current_user_msg]
-
-        # Record this user message to SQLite
-        self.memory.add_message(chat_id=chat_id, role="user", content=user_content)
-
-        system_instruction = self.build_system_prompt()
-        total_input_tokens = 0
-        total_output_tokens = 0
-        iterations = 0
-        max_iterations = getattr(self.config.llm, "max_tool_iterations", 10)
-
-        while iterations < max_iterations:
+            # Clean up expired conversations in background
             try:
-                response = await self.provider.generate_response(
-                    messages=messages,
-                    tools=self._tools,
-                    system_instruction=system_instruction,
+                self.memory.cleanup_old_conversations(
+                    retention_days=getattr(self.config.llm, "history_retention_days", 30)
                 )
-            except Exception as e:
-                logger.exception("LLM generation error: %s", e)
-                return f"❌ *LLM API Error ({self.provider_name}):* `{e}`"
+            except Exception:
+                pass
 
-            total_input_tokens += response.input_tokens
-            total_output_tokens += response.output_tokens
+            # Load recent conversational history up to history_turns
+            max_turns = getattr(self.config.llm, "history_turns", 10)
+            history: List[LLMMessage] = []
+            if max_turns > 0:
+                history = self.memory.get_history(chat_id=chat_id, max_turns=max_turns)
 
-            # If no tool calls requested, return the model's text response and persist it
-            if not response.tool_calls:
-                self.usage.record_usage(
-                    model=self.model_name,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    context=f"chat:{prompt[:30]}",
-                )
-                final_text = response.content or "I processed your request, but received an empty text response."
-                self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                return final_text
+            # Build initial message chain
+            current_user_msg = LLMMessage(role="user", content=user_content)
+            messages: List[LLMMessage] = list(history) + [current_user_msg]
 
-            # Append assistant message with requested tool calls
-            messages.append(
-                LLMMessage(
-                    role="assistant",
-                    content=response.content,
-                    tool_calls=response.tool_calls,
-                    raw=response.raw,
-                )
-            )
+            # Record this user message to SQLite
+            self.memory.add_message(chat_id=chat_id, role="user", content=user_content)
 
-            # Execute tool calls, truncate if excessive, and append results
-            halted_exception: Optional[CommandExecutionHalted] = None
-            for call in response.tool_calls:
+            system_instruction = self.build_system_prompt()
+            total_input_tokens = 0
+            total_output_tokens = 0
+            iterations = 0
+            max_iterations = getattr(self.config.llm, "max_tool_iterations", 10)
+
+            while iterations < max_iterations:
                 try:
-                    raw_result = self._execute_tool(call.name, call.arguments)
-                    if asyncio.iscoroutine(raw_result):
-                        raw_result = await raw_result
-                except CommandExecutionHalted as e:
-                    halted_exception = e
-                    break
+                    response = await self.provider.generate_response(
+                        messages=messages,
+                        tools=self._tools,
+                        system_instruction=system_instruction,
+                    )
                 except Exception as e:
-                    logger.exception("Error executing tool '%s': %s", call.name, e)
-                    raw_result = {"error": str(e)}
+                    logger.exception("LLM generation error: %s", e)
+                    return f"❌ *LLM API Error ({self.provider_name}):* `{e}`"
 
-                tool_result = self._truncate_tool_result(raw_result)
+                total_input_tokens += response.input_tokens
+                total_output_tokens += response.output_tokens
+
+                # If no tool calls requested, return the model's text response and persist it
+                if not response.tool_calls:
+                    self.usage.record_usage(
+                        model=self.model_name,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        context=f"chat:{prompt[:30]}",
+                    )
+                    final_text = response.content or "I processed your request, but received an empty text response."
+                    self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
+                    return final_text
+
+                # Append assistant message with requested tool calls
                 messages.append(
                     LLMMessage(
-                        role="tool",
-                        tool_call_id=call.id,
-                        name=call.name,
-                        content=tool_result,
+                        role="assistant",
+                        content=response.content,
+                        tool_calls=response.tool_calls,
+                        raw=response.raw,
                     )
                 )
 
-            if halted_exception:
-                logger.info(
-                    "Halting reasoning loop awaiting user approval for proposal %s on %s",
-                    halted_exception.proposal.id,
-                    halted_exception.proposal.target,
+                # Execute tool calls, truncate if excessive, and append results
+                halted_exception: Optional[CommandExecutionHalted] = None
+                for call in response.tool_calls:
+                    try:
+                        raw_result = self._execute_tool(call.name, call.arguments)
+                        if asyncio.iscoroutine(raw_result):
+                            raw_result = await raw_result
+                    except CommandExecutionHalted as e:
+                        halted_exception = e
+                        break
+                    except Exception as e:
+                        logger.exception("Error executing tool '%s': %s", call.name, e)
+                        raw_result = {"error": str(e)}
+
+                    tool_result = self._truncate_tool_result(raw_result)
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            tool_call_id=call.id,
+                            name=call.name,
+                            content=tool_result,
+                        )
+                    )
+
+                if halted_exception:
+                    logger.info(
+                        "Halting reasoning loop awaiting user approval for proposal %s on %s",
+                        halted_exception.proposal.id,
+                        halted_exception.proposal.target,
+                    )
+                    self.usage.record_usage(
+                        model=self.model_name,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        context=f"chat:halted:{halted_exception.proposal.id}",
+                    )
+                    final_text = halted_exception.halt_message
+                    self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
+                    return final_text
+
+                iterations += 1
+
+            # Iteration cap reached - synthesize observations gathered so far into a cohesive answer
+            try:
+                logger.info("Reached maximum iterations (%d); synthesizing observations into final answer", max_iterations)
+                synthesis_instruction = (
+                    f"{system_instruction}\n\n"
+                    "CRITICAL: You have reached the diagnostic tool iteration budget. "
+                    "Synthesize the facts, tool outputs, and diagnostic findings gathered so far into a clear, cohesive final response. "
+                    "Report what was discovered, note any pending commands awaiting user approval, and highlight any recommended next steps."
                 )
+                final_response = await self.provider.generate_response(
+                    messages=messages,
+                    tools=[],
+                    system_instruction=synthesis_instruction,
+                )
+                total_input_tokens += final_response.input_tokens
+                total_output_tokens += final_response.output_tokens
                 self.usage.record_usage(
                     model=self.model_name,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
-                    context=f"chat:halted:{halted_exception.proposal.id}",
+                    context="chat:iteration_limit_synthesized",
                 )
-                final_text = halted_exception.halt_message
-                self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                return final_text
-
-            iterations += 1
-
-        # Iteration cap reached - synthesize observations gathered so far into a cohesive answer
-        try:
-            logger.info("Reached maximum iterations (%d); synthesizing observations into final answer", max_iterations)
-            synthesis_instruction = (
-                f"{system_instruction}\n\n"
-                "CRITICAL: You have reached the diagnostic tool iteration budget. "
-                "Synthesize the facts, tool outputs, and diagnostic findings gathered so far into a clear, cohesive final response. "
-                "Report what was discovered, note any pending commands awaiting user approval, and highlight any recommended next steps."
-            )
-            final_response = await self.provider.generate_response(
-                messages=messages,
-                tools=[],
-                system_instruction=synthesis_instruction,
-            )
-            total_input_tokens += final_response.input_tokens
-            total_output_tokens += final_response.output_tokens
-            self.usage.record_usage(
-                model=self.model_name,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                context="chat:iteration_limit_synthesized",
-            )
-            synthesized_text = final_response.content or "Reached diagnostic limit. Please review the findings above."
-            synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
-            self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
-            return synthesized_text
-        except Exception as e:
-            logger.exception("Failed during turn limit synthesis: %s", e)
-            self.usage.record_usage(
-                model=self.model_name,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                context="chat:iteration_limit_fallback",
-            )
-            limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}). Please narrow your query or approve pending commands."
-            self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
-            return limit_msg
+                synthesized_text = final_response.content or "Reached diagnostic limit. Please review the findings above."
+                synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
+                self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
+                return synthesized_text
+            except Exception as e:
+                logger.exception("Failed during turn limit synthesis: %s", e)
+                self.usage.record_usage(
+                    model=self.model_name,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    context="chat:iteration_limit_fallback",
+                )
+                limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}). Please narrow your query or approve pending commands."
+                self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
+                return limit_msg
+        finally:
+            self._defer_proposals = False
 
     async def investigate_alert(
         self,

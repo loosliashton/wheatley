@@ -170,3 +170,47 @@ async def test_turn_limit_graceful_synthesis(mock_agent):
     assert "Synthesized final report" in answer
     assert "Diagnostic tool budget reached; synthesized from gathered observations" in answer
     assert call_count == 3  # 2 iteration loop calls + 1 synthesis call
+
+
+@pytest.mark.asyncio
+async def test_chat_defers_proposals_until_drained(mock_agent):
+    from wheatley.llm.base import BaseLLMProvider, LLMResponse, ToolCall
+
+    sink_called = []
+
+    async def mock_sink(prop):
+        sink_called.append(prop)
+
+    mock_agent.proposal_sink = mock_sink
+
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.model_name = "mock"
+    mock_provider.provider_name = "mock"
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="run_guest_command", arguments={"node": "cave", "vmid": 101, "command": "snapraid status"})],
+            input_tokens=50,
+            output_tokens=20,
+        )
+    )
+    mock_agent.provider = mock_provider
+
+    response = await mock_agent.chat("Check snapraid", chat_id="t2")
+    assert "I need permission to execute `snapraid status` on `cave/101`" in response
+
+    # proposal_sink was NOT called during chat because proposals were deferred
+    assert len(sink_called) == 0
+
+    # _defer_proposals was reset to False
+    assert mock_agent._defer_proposals is False
+
+    # Pending proposals are available and can be drained
+    drained = mock_agent.drain_pending_proposals()
+    assert len(drained) == 1
+    assert drained[0].command == "snapraid status"
+
+    # Pending proposals is now empty
+    assert len(mock_agent.drain_pending_proposals()) == 0
+

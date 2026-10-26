@@ -374,3 +374,119 @@ async def test_no_billing_caps_or_pauses(test_env):
     # Chat must proceed normally without any budget pause
     reply = await agent.chat("Are you paused?")
     assert reply == "Still answering!"
+
+
+# --- Conversation Memory & Tool Truncation Tests ---
+
+def test_conversation_store_persistence(tmp_path):
+    from wheatley.llm.memory import ConversationStore
+    db_file = str(tmp_path / "memory_test.db")
+    store = ConversationStore(db_file)
+
+    store.add_message("chat_1", "user", "Hello Wheatley")
+    store.add_message("chat_1", "assistant", "Greetings Commander")
+    store.add_message("chat_2", "user", "Different chat question")
+
+    h1 = store.get_history("chat_1", max_turns=5)
+    assert len(h1) == 2
+    assert h1[0].role == "user"
+    assert h1[0].content == "Hello Wheatley"
+    assert h1[1].role == "assistant"
+    assert h1[1].content == "Greetings Commander"
+
+    h2 = store.get_history("chat_2", max_turns=5)
+    assert len(h2) == 1
+    assert h2[0].content == "Different chat question"
+
+    # Reset chat_1
+    deleted = store.clear_history("chat_1")
+    assert deleted == 2
+    assert store.get_history("chat_1") == []
+    # chat_2 remains untouched
+    assert len(store.get_history("chat_2")) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_multi_turn_context_retention(test_env, tmp_path):
+    from wheatley.llm.memory import ConversationStore
+    cfg, audit, usage, clients, check_engine = test_env
+    mem_db = str(tmp_path / "agent_memory.db")
+    store = ConversationStore(mem_db)
+
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "mock"
+    mock_provider.model_name = "mock-model"
+
+    # Capture messages sent to provider
+    captured_messages = []
+    async def mock_generate(messages, tools, system_instruction):
+        captured_messages.append(list(messages))
+        return LLMResponse(content=f"Answer to: {messages[-1].content}")
+
+    mock_provider.generate_response = AsyncMock(side_effect=mock_generate)
+
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage, memory=store)
+
+    # Turn 1
+    reply1 = await agent.chat("Remember: my secret code is 42", chat_id="user_123")
+    assert "Answer to: Remember: my secret code is 42" in reply1
+    assert len(captured_messages[0]) == 1
+    assert captured_messages[0][0].content == "Remember: my secret code is 42"
+
+    # Turn 2: should include turn 1 history!
+    reply2 = await agent.chat("What is my code?", chat_id="user_123")
+    assert len(captured_messages[1]) == 3
+    assert captured_messages[1][0].role == "user"
+    assert captured_messages[1][0].content == "Remember: my secret code is 42"
+    assert captured_messages[1][1].role == "assistant"
+    assert captured_messages[1][2].role == "user"
+    assert captured_messages[1][2].content == "What is my code?"
+
+    # Reset chat
+    del_count = agent.reset_conversation("user_123")
+    assert del_count == 4  # 2 user + 2 assistant messages
+
+    # Turn 3 after reset: should start fresh without history
+    reply3 = await agent.chat("Hello fresh turn", chat_id="user_123")
+    assert len(captured_messages[2]) == 1
+    assert captured_messages[2][0].content == "Hello fresh turn"
+
+
+def test_tool_result_truncation(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    cfg.llm.max_tool_result_chars = 100
+    agent = LLMAgent(cfg, audit, usage=usage)
+
+    # 1. Truncate long string
+    long_str = "x" * 250
+    truncated_str = agent._truncate_tool_result(long_str)
+    assert len(truncated_str) < 250
+    assert "truncated" in truncated_str
+
+    # 2. Truncate large dict
+    large_dict = {"data": "y" * 300, "meta": "info"}
+    truncated_dict = agent._truncate_tool_result(large_dict)
+    assert "truncated" in str(truncated_dict)
+
+
+@pytest.mark.asyncio
+async def test_investigate_alert(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "mock"
+    mock_provider.model_name = "mock-model"
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content="Probable cause: Out of memory on Plex LXC.",
+            tool_calls=[],
+            input_tokens=800,
+            output_tokens=40,
+        )
+    )
+
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
+    diag = await agent.investigate_alert("plex", "HTTP 503 Service Unavailable", chat_id="alert_test")
+    assert "Out of memory" in diag
+

@@ -10,12 +10,11 @@ import sys
 from pathlib import Path
 
 from wheatley.audit import AuditLogger
-from wheatley.budget import BudgetTracker
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
 from wheatley.health import HealthMonitor
-from wheatley.llm import LLMAgent, UsageTracker
+from wheatley.llm import ConversationStore, LLMAgent, UsageTracker
 from wheatley.webhook import WebhookServer
 
 logging.basicConfig(
@@ -38,7 +37,8 @@ class WheatleyApp:
         self.config: WheatleyConfig = load_config(config_path, secrets_path)
         self.audit = AuditLogger()
         self.usage = UsageTracker(self.audit)
-        self.budget = BudgetTracker(self.config.budget, self.audit)
+        self.budget = self.usage  # Backwards compatibility alias
+        self.memory = ConversationStore(self.audit.db_path)
         self.bot: TelegramBot | None = None
         self.check_engine: CheckEngine | None = None
         self.llm_agent: LLMAgent | None = None
@@ -151,6 +151,7 @@ class WheatleyApp:
             usage=self.usage,
             check_engine=self.check_engine,
             proxmox_clients=self.check_engine.clients,
+            memory=self.memory,
         )
         self.gemini_agent = self.llm_agent  # Backwards compatibility
 
@@ -398,11 +399,29 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
         question = " ".join(args.question)
         print(f"🤖 Wheatley thinking with {agent.provider_name} ({agent.model_name})...\n")
-        response = asyncio.run(agent.chat(question))
+        response = asyncio.run(agent.chat(question, chat_id="cli"))
         print(response)
     except Exception as e:
         print(f"❌ Ask error: {e}", file=sys.stderr)
         logger.exception("Ask failed: %s", e)
+        sys.exit(1)
+
+
+def cmd_reset(args: argparse.Namespace) -> None:
+    try:
+        audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
+        memory = ConversationStore(audit.db_path)
+        chat_id = getattr(args, "chat_id", None)
+        if chat_id:
+            count = memory.clear_history(chat_id)
+            print(f"🧹 Cleared conversation memory for chat session '{chat_id}' ({count} messages deleted).")
+        else:
+            with memory._get_conn() as conn:
+                count = conn.execute("DELETE FROM conversations").rowcount
+                conn.commit()
+            print(f"🧹 Cleared all stored conversation history ({count} messages deleted).")
+    except Exception as e:
+        print(f"❌ Reset error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -463,6 +482,11 @@ def main() -> None:
     p_check.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
     p_check.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
 
+    # Reset
+    p_rst = subparsers.add_parser("reset", help="Clear conversation history and context")
+    p_rst.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
+    p_rst.add_argument("--chat-id", help="Specific chat ID to clear (defaults to all)")
+
     # Audit
     p_aud = subparsers.add_parser("audit", help="Inspect audit logs")
     p_aud.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
@@ -499,6 +523,9 @@ def main() -> None:
 
     elif args.command == "audit":
         cmd_audit(args)
+
+    elif args.command == "reset":
+        cmd_reset(args)
 
     else:
         parser.print_help()

@@ -12,6 +12,7 @@ from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig
 from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinition
+from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker
 from wheatley.tools.proxmox import ProxmoxClient
@@ -36,6 +37,9 @@ class LLMAgent:
         self.audit = audit
         self.check_engine = check_engine
         self.clients = proxmox_clients or {}
+
+        # Conversation Memory (SQLite-backed)
+        self.memory = kwargs.get("memory") or ConversationStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
 
         # Usage tracker (records tokens without billing blocks/caps)
         if usage is not None:
@@ -293,8 +297,53 @@ class LLMAgent:
             "note": "Proposal prepared. Explain this to the user; state changes require explicit interactive button approval.",
         }
 
-    async def chat(self, prompt: str, context_note: Optional[str] = None) -> str:
-        """Run the multi-turn conversational reasoning loop."""
+    def _truncate_tool_result(self, result: Any) -> Any:
+        """Cap tool output payload to prevent context window overflow."""
+        max_chars = getattr(self.config.llm, "max_tool_result_chars", 4000)
+        if isinstance(result, str):
+            if len(result) > max_chars:
+                return result[:max_chars] + f"\n... [Output truncated at {max_chars} chars; refine query if needed]"
+            return result
+
+        try:
+            raw_json = json.dumps(result, default=str)
+            if len(raw_json) > max_chars:
+                if isinstance(result, dict):
+                    truncated_dict: Dict[str, Any] = {}
+                    for k, v in result.items():
+                        if isinstance(v, str) and len(v) > max_chars // 2:
+                            truncated_dict[k] = v[: max_chars // 2] + "... [truncated]"
+                        elif isinstance(v, list) and len(v) > 20:
+                            truncated_dict[k] = v[:20]
+                            truncated_dict[f"{k}_note"] = f"Truncated to 20 items (total was {len(v)})"
+                        else:
+                            truncated_dict[k] = v
+                    new_raw = json.dumps(truncated_dict, default=str)
+                    if len(new_raw) > max_chars:
+                        return {
+                            "truncated_data": new_raw[:max_chars],
+                            "_warning": f"Tool result exceeded {max_chars} chars and was truncated.",
+                        }
+                    return truncated_dict
+                return {
+                    "truncated_data": raw_json[:max_chars],
+                    "_warning": f"Tool result exceeded {max_chars} chars and was truncated.",
+                }
+        except Exception:
+            pass
+        return result
+
+    def reset_conversation(self, chat_id: str) -> int:
+        """Clear conversation history for a given chat session."""
+        return self.memory.clear_history(chat_id)
+
+    async def chat(
+        self,
+        prompt: str,
+        chat_id: str = "default",
+        context_note: Optional[str] = None,
+    ) -> str:
+        """Run the multi-turn conversational reasoning loop with SQLite memory persistence."""
         if not self.is_configured:
             return (
                 f"⚠️ *LLM Provider '{self.provider_name}' is unconfigured.*\n\n"
@@ -308,9 +357,28 @@ class LLMAgent:
         if context_note:
             user_content = f"Context: {context_note}\n\nQuestion: {prompt}"
 
-        system_instruction = self.build_system_prompt()
-        messages: List[LLMMessage] = [LLMMessage(role="user", content=user_content)]
+        # Clean up expired conversations in background
+        try:
+            self.memory.cleanup_old_conversations(
+                retention_days=getattr(self.config.llm, "history_retention_days", 30)
+            )
+        except Exception:
+            pass
 
+        # Load recent conversational history up to history_turns
+        max_turns = getattr(self.config.llm, "history_turns", 10)
+        history: List[LLMMessage] = []
+        if max_turns > 0:
+            history = self.memory.get_history(chat_id=chat_id, max_turns=max_turns)
+
+        # Build initial message chain
+        current_user_msg = LLMMessage(role="user", content=user_content)
+        messages: List[LLMMessage] = list(history) + [current_user_msg]
+
+        # Record this user message to SQLite
+        self.memory.add_message(chat_id=chat_id, role="user", content=user_content)
+
+        system_instruction = self.build_system_prompt()
         total_input_tokens = 0
         total_output_tokens = 0
         iterations = 0
@@ -330,7 +398,7 @@ class LLMAgent:
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
 
-            # If no tool calls requested, return the model's text response
+            # If no tool calls requested, return the model's text response and persist it
             if not response.tool_calls:
                 self.usage.record_usage(
                     model=self.model_name,
@@ -338,7 +406,9 @@ class LLMAgent:
                     output_tokens=total_output_tokens,
                     context=f"chat:{prompt[:30]}",
                 )
-                return response.content or "I processed your request, but received an empty text response."
+                final_text = response.content or "I processed your request, but received an empty text response."
+                self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
+                return final_text
 
             # Append assistant message with requested tool calls
             messages.append(
@@ -350,9 +420,10 @@ class LLMAgent:
                 )
             )
 
-            # Execute tool calls and append results
+            # Execute tool calls, truncate if excessive, and append results
             for call in response.tool_calls:
-                tool_result = self._execute_tool(call.name, call.arguments)
+                raw_result = self._execute_tool(call.name, call.arguments)
+                tool_result = self._truncate_tool_result(raw_result)
                 messages.append(
                     LLMMessage(
                         role="tool",
@@ -371,13 +442,16 @@ class LLMAgent:
             output_tokens=total_output_tokens,
             context="chat:iteration_limit",
         )
-        return f"⚠️ Reached maximum function calling iterations ({max_iterations}) without completing. Please narrow your query."
+        limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}) without completing. Please narrow your query."
+        self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
+        return limit_msg
 
     async def investigate_alert(
         self,
         check_id: str,
         issue_summary: str,
         details: Optional[Dict[str, Any]] = None,
+        chat_id: str = "default",
     ) -> str:
         """Automated alert root-cause diagnosis using the configured LLM."""
         prompt = (
@@ -387,4 +461,8 @@ class LLMAgent:
             "Please investigate this issue: check live cluster status, inspect the affected guest and check state, "
             "determine the probable root cause, and provide clear, actionable troubleshooting steps or commands."
         )
-        return await self.chat(prompt, context_note=f"Investigating alert for check '{check_id}'")
+        return await self.chat(
+            prompt,
+            chat_id=chat_id,
+            context_note=f"Investigating alert for check '{check_id}'",
+        )

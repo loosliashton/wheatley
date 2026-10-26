@@ -99,6 +99,7 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("investigate", self._cmd_investigate))
         self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
+        self.app.add_handler(CommandHandler("reset", self._cmd_reset))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
 
@@ -184,6 +185,7 @@ class TelegramBot(ChatInterface):
             f"• `/usage` - View LLM token spend & activity\n"
             f"• `/discover` - Auto-detect services & containers\n"
             f"• `/audit` - Inspect recent action logs\n"
+            f"• `/reset` - Clear conversation history & memory\n"
             f"• `/help` - See all available commands\n\n"
             f"You can also chat directly with me about any homelab questions!"
         )
@@ -203,6 +205,7 @@ class TelegramBot(ChatInterface):
             "/unmute <id> - Re-enable alerts for a check\n"
             "/discover - Probe nodes & guests to discover active services\n"
             "/audit - Recent security and activity audit log\n"
+            "/reset - Clear conversation context & start fresh\n"
             "/help - Display this manual\n\n"
             "💬 *AI Chat:* Simply send a message to ask questions or diagnose services!"
         )
@@ -366,6 +369,16 @@ class TelegramBot(ChatInterface):
         else:
             await self._send_or_reply("⚠️ Token usage tracker is not connected.", target=update.message)
 
+    async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
+        if self.agent and hasattr(self.agent, "reset_conversation"):
+            deleted = self.agent.reset_conversation(chat_id)
+            await self._send_or_reply(f"🧹 *Conversation memory cleared.* ({deleted} turns removed)", target=update.message)
+        else:
+            await self._send_or_reply("🧹 Conversation reset.", target=update.message)
+
     async def _cmd_investigate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
@@ -380,11 +393,16 @@ class TelegramBot(ChatInterface):
             return
 
         model_name = getattr(self.agent, "model_name", "LLM")
+        chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
         await self._send_or_reply(
             f"🔍 *Investigating `{check_id}` with {model_name}...*",
             target=update.message,
         )
-        diagnosis = await self.agent.investigate_alert(check_id, f"Manual investigation triggered for {check_id}")
+        diagnosis = await self.agent.investigate_alert(
+            check_id=check_id,
+            issue_summary=f"Manual investigation triggered for {check_id}",
+            chat_id=chat_id,
+        )
         await self._send_or_reply(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", target=update.message)
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -429,6 +447,7 @@ class TelegramBot(ChatInterface):
             check_id = data.split(":", 1)[1]
             if self.agent and self.agent.is_configured:
                 model_name = getattr(self.agent, "model_name", "LLM")
+                chat_id = str(query.message.chat_id) if query.message else "default"
                 self.audit.log_event("AI", f"tg:{user_id}", f"investigate:{check_id}", "TRIGGERED")
                 await self._send_or_reply(
                     f"🔍 *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
@@ -437,6 +456,7 @@ class TelegramBot(ChatInterface):
                 diagnosis = await self.agent.investigate_alert(
                     check_id=check_id,
                     issue_summary=f"Alert investigation requested for {check_id}",
+                    chat_id=chat_id,
                 )
                 await self._send_or_reply(
                     f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
@@ -460,7 +480,8 @@ class TelegramBot(ChatInterface):
             except Exception:
                 pass
 
-            response = await self.agent.chat(text)
+            chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
+            response = await self.agent.chat(text, chat_id=chat_id)
             await self._send_or_reply(response, target=update.message)
         else:
             await self._send_or_reply(

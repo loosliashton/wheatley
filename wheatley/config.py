@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml
+
+logger = logging.getLogger("wheatley.config")
 
 
 ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z0-9_]+)(?::-(.*?))?\}")
@@ -61,6 +64,9 @@ class LLMConfig(BaseModel):
     )
     temperature: float = Field(0.2, description="Inference temperature")
     max_tool_iterations: int = Field(10, description="Max function-calling reasoning turns")
+    history_turns: int = Field(10, description="Recent conversation turns retained in memory for context")
+    history_retention_days: int = Field(30, description="Days to retain conversation history in SQLite")
+    max_tool_result_chars: int = Field(4000, description="Max characters for a single tool result before truncation")
 
 
 class BudgetConfig(BaseModel):
@@ -165,6 +171,10 @@ class WheatleyConfig(BaseModel):
         """Map legacy budget block to llm block if llm is not explicitly provided."""
         if isinstance(data, dict):
             if "budget" in data and isinstance(data["budget"], dict):
+                logger.warning(
+                    "The 'budget:' section in configuration is deprecated and billing caps are removed. "
+                    "Use 'llm:' instead to configure your provider and model."
+                )
                 b = data["budget"]
                 if "llm" not in data:
                     data["llm"] = {

@@ -34,10 +34,14 @@ async def test_send_allowlist_proposal(mock_bot):
         risk="LOW",
         proposal_type="ALLOWLIST_RULE",
         pattern="smartctl -a *",
+        justification="Determine if drive is failing after sector errors",
     )
 
     mock_bot._send_or_reply.assert_called_once()
-    _, kwargs = mock_bot._send_or_reply.call_args
+    args, kwargs = mock_bot._send_or_reply.call_args
+    sent_text = args[0]
+    assert "*Summary:* Check SMART disk data" in sent_text
+    assert "*Justification:* Determine if drive is failing after sector errors" in sent_text
     keyboard = kwargs["reply_markup"]
     assert keyboard is not None
     buttons = keyboard.inline_keyboard

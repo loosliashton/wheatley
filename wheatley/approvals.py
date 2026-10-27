@@ -37,6 +37,7 @@ class Proposal:
     expires_at: datetime
     hash: Optional[str] = None
     pattern: Optional[str] = None
+    justification: Optional[str] = None
     executed_at: Optional[datetime] = None
     execution_result: Optional[str] = None
 
@@ -84,6 +85,7 @@ class ApprovalStore:
                     command TEXT NOT NULL,
                     pattern TEXT,
                     summary TEXT NOT NULL,
+                    justification TEXT,
                     risk TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'PENDING',
                     created_at TEXT NOT NULL,
@@ -105,6 +107,8 @@ class ApprovalStore:
                 conn.execute("ALTER TABLE proposals ADD COLUMN pattern TEXT")
             if "summary" not in cols:
                 conn.execute("ALTER TABLE proposals ADD COLUMN summary TEXT DEFAULT ''")
+            if "justification" not in cols:
+                conn.execute("ALTER TABLE proposals ADD COLUMN justification TEXT")
 
             conn.execute(
                 """
@@ -128,6 +132,7 @@ class ApprovalStore:
         summary: str,
         risk: str = "MEDIUM",
         pattern: Optional[str] = None,
+        justification: Optional[str] = None,
         expires_minutes: int = 15,
     ) -> Proposal:
         """Create a new pending proposal."""
@@ -140,8 +145,8 @@ class ApprovalStore:
             conn.execute(
                 """
                 INSERT INTO proposals (
-                    id, hash, proposal_type, target, command, pattern, summary, risk, status, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    id, hash, proposal_type, target, command, pattern, summary, justification, risk, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
                 """,
                 (
                     prop_id,
@@ -151,6 +156,7 @@ class ApprovalStore:
                     command,
                     pattern,
                     summary,
+                    justification,
                     risk,
                     now.isoformat(),
                     expires.isoformat(),
@@ -166,6 +172,7 @@ class ApprovalStore:
             command=command,
             pattern=pattern,
             summary=summary,
+            justification=justification,
             risk=risk,
             status="PENDING",
             created_at=now,
@@ -200,6 +207,7 @@ class ApprovalStore:
                 command=row["command"],
                 pattern=row["pattern"],
                 summary=row["summary"],
+                justification=row["justification"] if "justification" in row.keys() else None,
                 risk=row["risk"],
                 status=status,
                 created_at=datetime.fromisoformat(row["created_at"]),
@@ -228,6 +236,7 @@ class ApprovalStore:
                         command=row["command"],
                         pattern=row["pattern"],
                         summary=row["summary"],
+                        justification=row["justification"] if "justification" in row.keys() else None,
                         risk=row["risk"],
                         status=row["status"],
                         created_at=datetime.fromisoformat(row["created_at"]),

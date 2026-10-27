@@ -657,4 +657,63 @@ async def test_chat_auto_intercepts_hallucinated_permission_prompt(test_env):
     assert agent.pending_proposals[0].target == "cave/100"
 
 
+@pytest.mark.asyncio
+async def test_command_tools_include_summary_and_justification(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    agent = LLMAgent(cfg, audit, usage=usage)
+
+    # 1. Verify Tool Definitions
+    tools_by_name = {t.name: t for t in agent._tools}
+    assert "run_host_command" in tools_by_name
+    assert "run_guest_command" in tools_by_name
+
+    host_params = tools_by_name["run_host_command"].parameters
+    assert "summary" in host_params["properties"]
+    assert "justification" in host_params["properties"]
+    assert "summary" in host_params["required"]
+    assert "justification" in host_params["required"]
+
+    guest_params = tools_by_name["run_guest_command"].parameters
+    assert "summary" in guest_params["properties"]
+    assert "justification" in guest_params["properties"]
+    assert "summary" in guest_params["required"]
+    assert "justification" in guest_params["required"]
+
+    # 2. Test execution of non-allowlisted command propagates summary and justification to proposal
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "gemini"
+    mock_provider.model_name = "gemini-3.8-flash"
+
+    tool_call = ToolCall(
+        id="call_guest_1",
+        name="run_guest_command",
+        arguments={
+            "node": "cave",
+            "vmid": 100,
+            "command": "docker exec audiobookshelf-1 node -e 'console.log(1)'",
+            "summary": "Inspect audiobookshelf items via node runtime",
+            "justification": "sqlite3 binary not available in PATH inside container",
+        },
+    )
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            tool_calls=[tool_call],
+        )
+    )
+
+    agent_with_provider = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
+    res = await agent_with_provider.chat("Check audiobookshelf", chat_id="justification_test")
+
+    assert "I need permission to execute" in res
+    assert len(agent_with_provider.pending_proposals) == 1
+    prop = agent_with_provider.pending_proposals[0]
+    assert prop.summary == "Inspect audiobookshelf items via node runtime"
+    assert prop.justification == "sqlite3 binary not available in PATH inside container"
+    assert prop.command == "docker exec audiobookshelf-1 node -e 'console.log(1)'"
+    assert prop.target == "cave/100"
+
+
+
 

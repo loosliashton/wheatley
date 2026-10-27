@@ -16,6 +16,7 @@ def test_create_and_get_proposal(store):
         target="cave/101",
         command="snapraid status",
         summary="Check snapraid parity state",
+        justification="Verify whether parity sync completed without sync errors",
         risk="LOW",
         pattern="snapraid status *",
         expires_minutes=15,
@@ -24,6 +25,8 @@ def test_create_and_get_proposal(store):
     assert prop.status == "PENDING"
     assert prop.is_pending is True
     assert prop.is_expired is False
+    assert prop.summary == "Check snapraid parity state"
+    assert prop.justification == "Verify whether parity sync completed without sync errors"
     assert prop.hash is not None and len(prop.hash) == 64
 
     fetched = store.get_proposal(prop.id)
@@ -33,6 +36,8 @@ def test_create_and_get_proposal(store):
     assert fetched.command == "snapraid status"
     assert fetched.target == "cave/101"
     assert fetched.pattern == "snapraid status *"
+    assert fetched.summary == "Check snapraid parity state"
+    assert fetched.justification == "Verify whether parity sync completed without sync errors"
 
 
 def test_proposal_expiration(store):

@@ -926,6 +926,7 @@ class TelegramBot(ChatInterface):
         risk: str,
         proposal_type: str = "ACTION",
         pattern: Optional[str] = None,
+        justification: Optional[str] = None,
         chat_id: Optional[int] = None,
     ) -> Any:
         cid = chat_id or self.primary_chat_id
@@ -944,12 +945,14 @@ class TelegramBot(ChatInterface):
                     ],
                 ]
             )
+            justification_line = f"*Justification:* {justification}\n" if justification else ""
             msg = (
                 f"⚙️ [SYSTEM] *COMMAND ALLOWLIST PROPOSAL*\n\n"
                 f"*Target:* `{target}`\n"
                 f"*Command to execute:*\n```bash\n{command}\n```\n"
                 f"*Suggested Rule:* `{pattern or command}`\n"
-                f"*Summary:* {summary}\n\n"
+                f"*Summary:* {summary}\n"
+                f"{justification_line}\n"
                 f"Select an option to proceed:"
             )
         elif proposal_type == "CONFIG_UPDATE":
@@ -1025,6 +1028,7 @@ class TelegramBot(ChatInterface):
                 risk=p.risk,
                 proposal_type=p.proposal_type,
                 pattern=p.pattern,
+                justification=getattr(p, "justification", None),
                 chat_id=chat_id,
             )
 

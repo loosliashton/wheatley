@@ -149,8 +149,16 @@ class LLMAgent:
                     "properties": {
                         "node": {"type": "string", "description": "Target Proxmox node name (e.g. cave, doug)"},
                         "command": {"type": "string", "description": "Shell command to execute on the host"},
+                        "summary": {
+                            "type": "string",
+                            "description": "Clear plain-English summary of what the command does (e.g. 'Check ZFS storage pool health and errors')",
+                        },
+                        "justification": {
+                            "type": "string",
+                            "description": "Explanation of why this specific command is needed to answer the user's inquiry or diagnose the issue",
+                        },
                     },
-                    "required": ["node", "command"],
+                    "required": ["node", "command", "summary", "justification"],
                 },
             ),
             ToolDefinition(
@@ -166,8 +174,16 @@ class LLMAgent:
                         "node": {"type": "string", "description": "Host node where the guest resides (e.g. cave)"},
                         "vmid": {"type": "integer", "description": "Virtual Machine or Container ID (e.g. 100, 102)"},
                         "command": {"type": "string", "description": "Shell command to execute inside the guest"},
+                        "summary": {
+                            "type": "string",
+                            "description": "Clear plain-English summary of what the command does (e.g. 'Count media items in audiobookshelf database')",
+                        },
+                        "justification": {
+                            "type": "string",
+                            "description": "Explanation of why this specific command is needed to answer the user's inquiry or diagnose the issue",
+                        },
                     },
-                    "required": ["node", "vmid", "command"],
+                    "required": ["node", "vmid", "command", "summary", "justification"],
                 },
             ),
             ToolDefinition(
@@ -249,7 +265,7 @@ class LLMAgent:
             "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call the 'propose_action' function so the user can review and approve it via Telegram buttons.",
             "3. Telegram Mobile Formatting: Homelab administrators read your messages on Telegram mobile screens. Format your answers cleanly: use bullet points (•) for lists, **bold** for key names and metrics, and triple-backtick code blocks for CLI commands. Avoid markdown tables (they do not render well on mobile; format tabular data as bullet lists instead).",
             "4. Grounded in Facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
-            "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. lsblk, smartctl, sensors, uptime, free, df, docker ps, docker logs, systemctl status, journalctl). Non-allowlisted commands will automatically produce an interactive approval proposal for the user to run once or permanently allow.",
+            "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. lsblk, smartctl, sensors, uptime, free, df, docker ps, docker logs, systemctl status, journalctl). When calling these tools, you MUST provide a meaningful 'summary' explaining what the command does in plain English (do not just repeat the command) and a 'justification' explaining why this specific command is required. Non-allowlisted commands will automatically produce an interactive approval proposal for the user showing your summary and justification.",
             "6. Tool Budget & Anti-Fishing Efficiency: You have a strict limit of function calling iterations per query. Plan your diagnostics efficiently:",
             "   • NEVER make speculative, trial-and-error, or guessing calls (e.g. testing drive paths /dev/sda, /dev/sdb... or guessing service names).",
             "   • ALWAYS run discovery commands first: use 'lsblk' or 'smartctl --scan' to discover disks, or 'systemctl list-units' / 'systemctl list-timers' to find active units.",
@@ -271,10 +287,19 @@ class LLMAgent:
             elif name == "run_health_check":
                 return self._tool_run_health_check(args.get("check_id", ""))
             elif name == "run_host_command":
-                return self._tool_run_host_command(args.get("node", ""), args.get("command", ""))
+                return self._tool_run_host_command(
+                    node=args.get("node", ""),
+                    command=args.get("command", ""),
+                    summary=args.get("summary"),
+                    justification=args.get("justification"),
+                )
             elif name == "run_guest_command":
                 return self._tool_run_guest_command(
-                    args.get("node", ""), int(args.get("vmid", 0)), args.get("command", "")
+                    node=args.get("node", ""),
+                    vmid=int(args.get("vmid", 0)),
+                    command=args.get("command", ""),
+                    summary=args.get("summary"),
+                    justification=args.get("justification"),
                 )
             elif name == "get_recent_audit_logs":
                 return self._tool_get_audit_logs(int(args.get("limit", 10)))
@@ -402,7 +427,13 @@ class LLMAgent:
         self.pending_proposals.clear()
         return props
 
-    async def _tool_run_host_command(self, node: str, command: str) -> Dict[str, Any]:
+    async def _tool_run_host_command(
+        self,
+        node: str,
+        command: str,
+        summary: Optional[str] = None,
+        justification: Optional[str] = None,
+    ) -> Dict[str, Any]:
         target = node
         active_user_rules = self.approvals.get_active_allowlist(target)
         effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
@@ -420,12 +451,14 @@ class LLMAgent:
                 valid, _ = validate_proposed_pattern(command.strip())
                 candidate_pattern = command.strip() if valid else command.strip()
 
+            prop_summary = summary or f"Execute diagnostic command on {target}"
             prop = self.approvals.create_proposal(
                 proposal_type="ALLOWLIST_RULE",
                 target=target,
                 command=command,
                 pattern=candidate_pattern,
-                summary=f"Allow read command on {target}: {command}",
+                summary=prop_summary,
+                justification=justification,
                 risk="LOW",
             )
             self._dispatch_proposal(prop)
@@ -446,7 +479,14 @@ class LLMAgent:
             "timed_out": res.timed_out,
         }
 
-    async def _tool_run_guest_command(self, node: str, vmid: int, command: str) -> Dict[str, Any]:
+    async def _tool_run_guest_command(
+        self,
+        node: str,
+        vmid: int,
+        command: str,
+        summary: Optional[str] = None,
+        justification: Optional[str] = None,
+    ) -> Dict[str, Any]:
         target = f"{node}/{vmid}"
         active_user_rules = self.approvals.get_active_allowlist(target)
         effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
@@ -464,12 +504,14 @@ class LLMAgent:
                 valid, _ = validate_proposed_pattern(command.strip())
                 candidate_pattern = command.strip() if valid else command.strip()
 
+            prop_summary = summary or f"Execute diagnostic command on {target}"
             prop = self.approvals.create_proposal(
                 proposal_type="ALLOWLIST_RULE",
                 target=target,
                 command=command,
                 pattern=candidate_pattern,
-                summary=f"Allow read command on {target}: {command}",
+                summary=prop_summary,
+                justification=justification,
                 risk="LOW",
             )
             self._dispatch_proposal(prop)
@@ -651,14 +693,25 @@ class LLMAgent:
                 return ToolCall(
                     id="pseudo_intercepted",
                     name="run_guest_command",
-                    arguments={"node": node, "vmid": vmid, "command": cmd},
+                    arguments={
+                        "node": node,
+                        "vmid": vmid,
+                        "command": cmd,
+                        "summary": f"Execute diagnostic command on {target}",
+                        "justification": "Required for requested diagnostic analysis",
+                    },
                 )
             except ValueError:
                 pass
         return ToolCall(
             id="pseudo_intercepted",
             name="run_host_command",
-            arguments={"node": target, "command": cmd},
+            arguments={
+                "node": target,
+                "command": cmd,
+                "summary": f"Execute diagnostic command on {target}",
+                "justification": "Required for requested diagnostic analysis",
+            },
         )
 
     def reset_conversation(self, chat_id: str) -> int:

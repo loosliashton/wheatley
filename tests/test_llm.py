@@ -599,3 +599,62 @@ async def test_llm_footer_distinguishes_ai_messages(test_env):
     assert "_🧠 gemini-3.8-flash · 1 tool call_" in reply1
 
 
+def test_intercept_pseudo_permission_call(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    agent = LLMAgent(cfg, audit, usage=usage)
+
+    # Empty / unrelated
+    assert agent._intercept_pseudo_permission_call(None) is None
+    assert agent._intercept_pseudo_permission_call("Everything looks fine.") is None
+
+    # Guest command match
+    text_guest = (
+        'I need permission to execute `docker exec audiobookshelf-audiobookshelf-1 node -e "console.log(1);"` '
+        'on `cave/100` to proceed with your request. Please choose whether to allow this command using the options below.'
+    )
+    tc = agent._intercept_pseudo_permission_call(text_guest)
+    assert tc is not None
+    assert tc.name == "run_guest_command"
+    assert tc.arguments["node"] == "cave"
+    assert tc.arguments["vmid"] == 100
+    assert tc.arguments["command"] == 'docker exec audiobookshelf-audiobookshelf-1 node -e "console.log(1);"'
+
+    # Host command match
+    text_host = "I require permission to execute `smartctl -a /dev/sda` on `cave` to proceed."
+    tc_host = agent._intercept_pseudo_permission_call(text_host)
+    assert tc_host is not None
+    assert tc_host.name == "run_host_command"
+    assert tc_host.arguments["node"] == "cave"
+    assert tc_host.arguments["command"] == "smartctl -a /dev/sda"
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_intercepts_hallucinated_permission_prompt(test_env):
+    cfg, audit, usage, clients, check_engine = test_env
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "gemini"
+    mock_provider.model_name = "gemini-3.8-flash"
+
+    # LLM hallucinates text instead of structured tool call
+    hallucinated_text = (
+        'I need permission to execute `docker exec test-container node -v` on `cave/100` '
+        'to proceed with your request. Please choose whether to allow this command using the options below.'
+    )
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(
+            content=hallucinated_text,
+            tool_calls=[],
+        )
+    )
+
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
+    # The interceptor should convert the text to run_guest_command, which halts on unallowed command and creates a proposal
+    res = await agent.chat("Check container version", chat_id="interceptor_test")
+    assert "I need permission to execute" in res
+    assert len(agent.pending_proposals) == 1
+    assert agent.pending_proposals[0].command == "docker exec test-container node -v"
+    assert agent.pending_proposals[0].target == "cave/100"
+
+
+

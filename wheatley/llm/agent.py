@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
@@ -12,7 +13,7 @@ from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig
-from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolDefinition
+from wheatley.llm.base import BaseLLMProvider, LLMMessage, ToolCall, ToolDefinition
 from wheatley.llm.memory import ConversationStore
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.usage import UsageTracker
@@ -253,6 +254,7 @@ class LLMAgent:
             "   • NEVER make speculative, trial-and-error, or guessing calls (e.g. testing drive paths /dev/sda, /dev/sdb... or guessing service names).",
             "   • ALWAYS run discovery commands first: use 'lsblk' or 'smartctl --scan' to discover disks, or 'systemctl list-units' / 'systemctl list-timers' to find active units.",
             "   • If a diagnostic command requires user approval or is blocked, explain clearly to the user what command is required rather than repeatedly guessing alternatives.",
+            "7. Structured Tool Calling vs Text: You must ALWAYS execute diagnostics or request mutations by invoking the tools ('run_guest_command', 'run_host_command', 'propose_action'). NEVER write out conversational text requesting permission (e.g. do NOT say 'I need permission to execute...'). The system intercepts non-allowlisted commands and automatically presents the interactive approval buttons to the user when you call the tool. Writing permission requests in text bypasses the proposal system and prevents commands from being executed.",
         ]
         return "\n".join(lines)
 
@@ -628,6 +630,37 @@ class LLMAgent:
             return f"\n\n_🧠 {model_disp} · {tool_calls_count} tool call{plural}_"
         return f"\n\n_🧠 {model_disp}_"
 
+    def _intercept_pseudo_permission_call(self, text: Optional[str]) -> Optional[ToolCall]:
+        """Detects if the LLM mimicked a canned permission prompt in text instead of invoking a tool."""
+        if not text:
+            return None
+        m = re.search(
+            r"(?:need|request|require)\s+permission\s+to\s+execute\s+[`\"](?P<cmd>.+?)[`\"]\s+on\s+(?:target\s+)?[`\"]?(?P<target>[a-zA-Z0-9_\-\.\/]+)[`\"]?",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return None
+        cmd = m.group("cmd").strip()
+        target = m.group("target").strip()
+        if "/" in target:
+            parts = target.split("/", 1)
+            node = parts[0]
+            try:
+                vmid = int(parts[1])
+                return ToolCall(
+                    id="pseudo_intercepted",
+                    name="run_guest_command",
+                    arguments={"node": node, "vmid": vmid, "command": cmd},
+                )
+            except ValueError:
+                pass
+        return ToolCall(
+            id="pseudo_intercepted",
+            name="run_host_command",
+            arguments={"node": target, "command": cmd},
+        )
+
     def reset_conversation(self, chat_id: str) -> int:
         """Clear conversation history for a given chat session."""
         return self.memory.clear_history(chat_id)
@@ -701,6 +734,17 @@ class LLMAgent:
 
                 total_input_tokens += response.input_tokens
                 total_output_tokens += response.output_tokens
+
+                # Check if model hallucinated a text permission request instead of invoking a tool call
+                if not response.tool_calls:
+                    pseudo_tool = self._intercept_pseudo_permission_call(response.content)
+                    if pseudo_tool:
+                        logger.info(
+                            "Intercepted text permission prompt; routing to tool '%s' with args %s",
+                            pseudo_tool.name,
+                            pseudo_tool.arguments,
+                        )
+                        response.tool_calls = [pseudo_tool]
 
                 # If no tool calls requested, return the model's text response and persist it
                 if not response.tool_calls:

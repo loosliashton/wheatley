@@ -153,6 +153,7 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CommandHandler("discover", self._cmd_discover))
         self.app.add_handler(CommandHandler("audit", self._cmd_audit))
         self.app.add_handler(CommandHandler("reset", self._cmd_reset))
+        self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
 
@@ -261,6 +262,7 @@ class TelegramBot(ChatInterface):
             "/discover - Probe nodes & guests to discover active services\n"
             "/audit - Recent security and activity audit log\n"
             "/reset - Clear conversation context & start fresh\n"
+            "/update - Check for updates and pull latest code from GitHub\n"
             "/help - Display this manual\n\n"
             "💬 *AI Chat:* Simply send a message to ask questions or diagnose services!"
         )
@@ -505,6 +507,58 @@ class TelegramBot(ChatInterface):
         else:
             await self._send_or_reply("⚙️ [SYSTEM] *Usage:* `/allowlist` (list rules) or `/allowlist revoke <id>` (remove rule)", target=update.message)
 
+    async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        from wheatley.updater import WheatleyUpdater
+
+        async with TypingIndicator(update.effective_chat):
+            updater = WheatleyUpdater()
+            loop = asyncio.get_running_loop()
+            check_res = await loop.run_in_executor(None, updater.check_for_updates)
+            if check_res.error:
+                await self._send_or_reply(
+                    f"⚙️ [SYSTEM] *Update Check Failed:*\n`{check_res.error}`",
+                    target=update.message,
+                )
+                return
+
+            if not check_res.has_update:
+                await self._send_or_reply(
+                    f"⚙️ [SYSTEM] *Wheatley is up to date!* (commit `{check_res.current_commit}`)\n"
+                    f"_{check_res.current_message}_",
+                    target=update.message,
+                )
+                return
+
+            commits_summary = "\n".join(f"• `{c}`" for c in check_res.incoming_commits[:8])
+            if len(check_res.incoming_commits) > 8:
+                commits_summary += f"\n• _... and {len(check_res.incoming_commits) - 8} more_"
+
+            summary = f"Update Wheatley to {check_res.remote_commit} ({len(check_res.incoming_commits)} new commits)"
+            prop = self.approvals.create_proposal(
+                proposal_type="SELF_UPDATE",
+                target="localhost",
+                command="wheatley update",
+                summary=summary,
+                risk="MEDIUM",
+            )
+            await self._send_or_reply(
+                f"⚙️ [SYSTEM] *Update Available for Wheatley!*\n\n"
+                f"• Current: `{check_res.current_commit}`\n"
+                f"• Latest: `{check_res.remote_commit}` on `{check_res.branch}`\n\n"
+                f"*New Commits:*\n{commits_summary}",
+                target=update.message,
+            )
+            await self.send_proposal(
+                proposal_id=prop.id,
+                summary=prop.summary,
+                command=prop.command,
+                target=prop.target,
+                risk=prop.risk,
+                chat_id=update.effective_chat.id if update.effective_chat else None,
+            )
+
     async def _execute_proposal_command(self, prop: Any) -> str:
         if not prop:
             return "❌ Proposal details not found."
@@ -536,6 +590,26 @@ class TelegramBot(ChatInterface):
             except Exception as e:
                 logger.exception("Failed to apply config update: %s", e)
                 return f"⚙️ [SYSTEM] *Failed to apply config update:* `{e}`"
+
+        elif getattr(prop, "proposal_type", "") == "SELF_UPDATE":
+            try:
+                from wheatley.updater import WheatleyUpdater
+
+                updater = WheatleyUpdater()
+                loop = asyncio.get_running_loop()
+                exec_res = await loop.run_in_executor(None, updater.perform_update)
+                if not exec_res.success:
+                    return f"⚙️ [SYSTEM] *Update Failed:* {exec_res.message}"
+                restarted_msg = "• Service restarted successfully." if exec_res.service_restarted else "• Service restart pending."
+                return (
+                    f"⚙️ [SYSTEM] *Wheatley updated successfully!*\n"
+                    f"• Version: `{exec_res.old_commit}` ➡️ `{exec_res.new_commit}`\n"
+                    f"• Commits pulled: {len(exec_res.commits_pulled)}\n"
+                    f"{restarted_msg}"
+                )
+            except Exception as e:
+                logger.exception("Self-update failed: %s", e)
+                return f"⚙️ [SYSTEM] *Update error:* `{e}`"
 
         executor = self.shell or (getattr(self.agent, "shell", None) if self.agent else None)
         if not executor:
@@ -676,6 +750,12 @@ class TelegramBot(ChatInterface):
                             f"Configuration update for '{prop.target}' was approved and applied.\n"
                             f"Execution output:\n{res}\n\n"
                             "Please confirm to the user that the configuration has been updated and the check engine reloaded."
+                        )
+                    elif prop.proposal_type == "SELF_UPDATE":
+                        continuation = (
+                            f"Wheatley self-update was approved and executed.\n"
+                            f"Execution output:\n{res}\n\n"
+                            "Please confirm the update to the user concisely."
                         )
                     else:
                         continuation = (

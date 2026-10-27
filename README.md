@@ -143,6 +143,12 @@ wheatley audit
 # Inspect the last 25 audit events
 wheatley audit -n 25
 
+# Pull the latest version from GitHub and update Wheatley
+wheatley update
+
+# Check for updates without applying
+wheatley update --check
+
 # Show CLI help
 wheatley --help
 ```
@@ -160,6 +166,7 @@ From your authorized Telegram chat:
 - `/unmute <check_id>` — Re-enables alerts for a silenced check.
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
 - `/audit` — Views recent security, webhook, and operational audit events.
+- `/update` — Checks for available GitHub updates and proposes self-update.
 - `/help` — Displays command cheat sheet and operational guidelines.
 
 ---

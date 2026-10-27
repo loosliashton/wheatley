@@ -513,6 +513,17 @@ def main() -> None:
     p_aud.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
     p_aud.add_argument("--limit", "-n", type=int, default=15)
 
+    # Update
+    p_upd = subparsers.add_parser("update", help="Pull latest version from GitHub and update Wheatley")
+    p_upd.add_argument("--check", action="store_true", help="Check for available updates without applying them")
+    p_upd.add_argument("--branch", "-b", help="Git branch to pull from (default: currently checked out branch)")
+    p_upd.add_argument("--remote", "-r", default="origin", help="Git remote name (default: origin)")
+    p_upd.add_argument("--repo-dir", help="Path to Wheatley repository directory (default: auto-detected)")
+    p_upd.add_argument("--no-restart", action="store_true", help="Do not restart systemd service after updating")
+    p_upd.add_argument("--no-pip", action="store_true", help="Do not reinstall Python package via pip")
+    p_upd.add_argument("--force", "-f", action="store_true", help="Discard local uncommitted changes before updating")
+    p_upd.add_argument("--json", action="store_true", help="Output update result as JSON")
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -547,6 +558,10 @@ def main() -> None:
 
     elif args.command == "reset":
         cmd_reset(args)
+
+    elif args.command == "update":
+        from wheatley.updater import run_cli_update
+        sys.exit(run_cli_update(args))
 
     else:
         parser.print_help()

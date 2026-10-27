@@ -556,8 +556,25 @@ class TelegramBot(ChatInterface):
                 command=prop.command,
                 target=prop.target,
                 risk=prop.risk,
+                proposal_type=prop.proposal_type,
                 chat_id=update.effective_chat.id if update.effective_chat else None,
             )
+
+    async def _schedule_service_restart(self, delay_seconds: float = 2.0) -> None:
+        """Schedules a detached systemctl restart after a delay so that Telegram messages are delivered."""
+        await asyncio.sleep(delay_seconds)
+        try:
+            import subprocess
+
+            logger.info("Triggering detached service restart for wheatley.service...")
+            subprocess.Popen(
+                ["sudo", "-n", "systemctl", "restart", "wheatley"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.error("Failed to trigger service restart: %s", e)
 
     async def _execute_proposal_command(self, prop: Any) -> str:
         if not prop:
@@ -597,15 +614,20 @@ class TelegramBot(ChatInterface):
 
                 updater = WheatleyUpdater()
                 loop = asyncio.get_running_loop()
-                exec_res = await loop.run_in_executor(None, updater.perform_update)
+                exec_res = await loop.run_in_executor(
+                    None, lambda: updater.perform_update(restart_service=False)
+                )
                 if not exec_res.success:
                     return f"⚙️ [SYSTEM] *Update Failed:* {exec_res.message}"
-                restarted_msg = "• Service restarted successfully." if exec_res.service_restarted else "• Service restart pending."
+
+                # Schedule detached restart after brief delay to allow Telegram response delivery
+                asyncio.create_task(self._schedule_service_restart(delay_seconds=2.0))
+
                 return (
                     f"⚙️ [SYSTEM] *Wheatley updated successfully!*\n"
                     f"• Version: `{exec_res.old_commit}` ➡️ `{exec_res.new_commit}`\n"
                     f"• Commits pulled: {len(exec_res.commits_pulled)}\n"
-                    f"{restarted_msg}"
+                    f"• Service reload scheduled in 2 seconds."
                 )
             except Exception as e:
                 logger.exception("Self-update failed: %s", e)
@@ -952,6 +974,21 @@ class TelegramBot(ChatInterface):
                 f"*Summary:* {summary}\n\n"
                 f"*Proposed Diff:*\n```diff\n{diff_text}\n```\n"
                 f"Tap Approve Update to apply changes and reload the check engine, or Deny to cancel."
+            )
+        elif proposal_type == "SELF_UPDATE":
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("🚀 Update Now", callback_data=f"approve:{proposal_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"deny:{proposal_id}"),
+                    ]
+                ]
+            )
+            msg = (
+                f"⚙️ [SYSTEM] *WHEATLEY UPDATE PROPOSAL*\n\n"
+                f"*Summary:* {summary}\n"
+                f"*Action:* Pull latest commits, update packages, and reload Wheatley\n\n"
+                f"Tap Update Now to proceed or Cancel."
             )
         else:
             keyboard = InlineKeyboardMarkup(

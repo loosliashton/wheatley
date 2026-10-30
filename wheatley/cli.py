@@ -131,14 +131,12 @@ class WheatleyApp:
                 return await self.bot.send_alert(text, extra)
             return None
 
-        # 1. Initialize and start Check Engine
+        # 1. Initialize Check Engine
         self.check_engine = CheckEngine(
             config=self.config,
             audit=self.audit,
             alert_sink=_forward_alert if self.config.chat.telegram else None,
         )
-        self.check_engine.start()
-        logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
 
         # 2. Initialize LLM Agent
         self.llm_agent = LLMAgent(
@@ -189,6 +187,10 @@ class WheatleyApp:
                     )
 
             self.llm_agent.proposal_sink = _on_proposal
+
+        # Start Check Engine after bot is wired so early check alerts are never dropped
+        self.check_engine.start()
+        logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
 
         # 4. Health probes (for external watchdogs)
         engine = self.check_engine

@@ -190,13 +190,13 @@ class ApprovalStore:
 
             return Proposal(
                 id=row["id"],
-                hash=row["hash"] if "hash" in row.keys() else None,
+                hash=row["hash"],
                 proposal_type=row["proposal_type"],
                 target=row["target"],
                 command=row["command"],
                 pattern=row["pattern"],
                 summary=row["summary"],
-                justification=row["justification"] if "justification" in row.keys() else None,
+                justification=row["justification"],
                 risk=row["risk"],
                 status=status,
                 created_at=datetime.fromisoformat(row["created_at"]),
@@ -219,13 +219,13 @@ class ApprovalStore:
                 props.append(
                     Proposal(
                         id=row["id"],
-                        hash=row["hash"] if "hash" in row.keys() else None,
+                        hash=row["hash"],
                         proposal_type=row["proposal_type"],
                         target=row["target"],
                         command=row["command"],
                         pattern=row["pattern"],
                         summary=row["summary"],
-                        justification=row["justification"] if "justification" in row.keys() else None,
+                        justification=row["justification"],
                         risk=row["risk"],
                         status=row["status"],
                         created_at=datetime.fromisoformat(row["created_at"]),

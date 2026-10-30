@@ -56,6 +56,7 @@ class LLMAgent:
         self.proposal_sink = proposal_sink
         self.pending_proposals: List[Any] = []
         self._defer_proposals: bool = False
+        self._active_chat_turns: int = 0
 
         self.usage = usage if usage is not None else UsageTracker(self.audit)
         self.provider = provider if provider is not None else get_llm_provider(self.config.llm)
@@ -353,7 +354,9 @@ class LLMAgent:
 
         turn_proposals: List[Any] = []
         token = _turn_proposals_var.set(turn_proposals)
-        self.pending_proposals = []
+        if self._active_chat_turns == 0:
+            self.pending_proposals = []
+        self._active_chat_turns += 1
         self._defer_proposals = True
         try:
             user_content = prompt
@@ -536,7 +539,9 @@ class LLMAgent:
                 return f"{limit_msg}{self._format_llm_footer(total_tool_calls)}"
         finally:
             _turn_proposals_var.reset(token)
-            self._defer_proposals = False
+            self._active_chat_turns = max(0, self._active_chat_turns - 1)
+            if self._active_chat_turns == 0:
+                self._defer_proposals = False
 
     async def investigate_alert(
         self,

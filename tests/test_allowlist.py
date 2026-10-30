@@ -11,16 +11,16 @@ def test_allowed_basic_commands():
         "df -h",
         "top -b -n 1",
         "journalctl -n 50",
-        "journalctl -u frigate.service -n 20",
-        "systemctl status frigate",
-        "systemctl is-active frigate.service",
-        "systemctl is-failed frigate",
+        "journalctl -u nginx.service -n 20",
+        "systemctl status nginx",
+        "systemctl is-active nginx.service",
+        "systemctl is-failed nginx",
         "docker ps",
         "docker ps -a --format json",
         'docker ps -a --format "{{json .}}"',
-        "docker logs frigate",
-        "docker logs --tail 50 plex",
-        "docker inspect plex",
+        "docker logs nginx",
+        "docker logs --tail 50 webapp",
+        "docker inspect webapp",
         "docker stats --no-stream",
         "zpool status",
         "zpool status -x",
@@ -77,7 +77,7 @@ def test_redirections_rejected():
         "uptime > /tmp/pwn",
         "uptime >> /etc/passwd",
         "cat < /etc/shadow",
-        "systemctl status frigate > /tmp/out",
+        "systemctl status nginx > /tmp/out",
     ]
     for cmd in redirects:
         ok, reason = is_command_allowed(cmd)
@@ -87,7 +87,7 @@ def test_redirections_rejected():
 
 def test_safe_pipes_allowed():
     safe_pipes = [
-        "docker ps | grep frigate",
+        "docker ps | grep nginx",
         "docker ps -a | grep -i exited",
         "journalctl -n 100 | head -n 20",
         "journalctl -n 100 | tail -n 10 | wc -l",
@@ -125,10 +125,10 @@ def test_non_allowlisted_commands_rejected():
         "curl http://example.com",
         "wget http://example.com",
         "useradd hacker",
-        "systemctl restart frigate",
-        "systemctl stop frigate",
-        "docker stop frigate",
-        "docker rm frigate",
+        "systemctl restart nginx",
+        "systemctl stop nginx",
+        "docker stop nginx",
+        "docker rm nginx",
     ]
     for cmd in non_allowlisted:
         ok, reason = is_command_allowed(cmd)
@@ -152,11 +152,11 @@ def test_forbidden_mutating_arguments():
         "smartctl -s off /dev/sda",
         "smartctl --smart=off /dev/sda",
         "sensors -s",
-        "systemctl start frigate",
-        "systemctl stop frigate",
+        "systemctl start nginx",
+        "systemctl stop nginx",
         "docker run -d nginx",
-        "docker rm frigate",
-        "docker restart plex",
+        "docker rm nginx",
+        "docker restart webapp",
         "zpool create testpool /dev/sdb",
         "zpool destroy testpool",
     ]

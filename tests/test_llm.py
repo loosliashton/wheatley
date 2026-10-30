@@ -303,7 +303,7 @@ async def test_chat_unconfigured(test_env):
     mock_provider.provider_name = "gemini"
 
     agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
-    res = await agent.chat("Why is Frigate down?")
+    res = await agent.chat("Why is the web server down?")
     assert "unconfigured" in res
 
 
@@ -609,22 +609,22 @@ def test_intercept_pseudo_permission_call(test_env):
 
     # Guest command match
     text_guest = (
-        'I need permission to execute `docker exec audiobookshelf-audiobookshelf-1 node -e "console.log(1);"` '
-        'on `cave/100` to proceed with your request. Please choose whether to allow this command using the options below.'
+        'I need permission to execute `docker exec webapp-1 node -e "console.log(1);"` '
+        'on `pve-node-01/100` to proceed with your request. Please choose whether to allow this command using the options below.'
     )
     tc = agent._intercept_pseudo_permission_call(text_guest)
     assert tc is not None
     assert tc.name == "run_guest_command"
-    assert tc.arguments["node"] == "cave"
+    assert tc.arguments["node"] == "pve-node-01"
     assert tc.arguments["vmid"] == 100
-    assert tc.arguments["command"] == 'docker exec audiobookshelf-audiobookshelf-1 node -e "console.log(1);"'
+    assert tc.arguments["command"] == 'docker exec webapp-1 node -e "console.log(1);"'
 
     # Host command match
-    text_host = "I require permission to execute `smartctl -a /dev/sda` on `cave` to proceed."
+    text_host = "I require permission to execute `smartctl -a /dev/sda` on `pve-node-01` to proceed."
     tc_host = agent._intercept_pseudo_permission_call(text_host)
     assert tc_host is not None
     assert tc_host.name == "run_host_command"
-    assert tc_host.arguments["node"] == "cave"
+    assert tc_host.arguments["node"] == "pve-node-01"
     assert tc_host.arguments["command"] == "smartctl -a /dev/sda"
 
 
@@ -638,7 +638,7 @@ async def test_chat_auto_intercepts_hallucinated_permission_prompt(test_env):
 
     # LLM hallucinates text instead of structured tool call
     hallucinated_text = (
-        'I need permission to execute `docker exec test-container node -v` on `cave/100` '
+        'I need permission to execute `docker exec test-container node -v` on `pve-node-01/100` '
         'to proceed with your request. Please choose whether to allow this command using the options below.'
     )
     mock_provider.generate_response = AsyncMock(
@@ -654,7 +654,7 @@ async def test_chat_auto_intercepts_hallucinated_permission_prompt(test_env):
     assert "I need permission to execute" in res
     assert len(agent.pending_proposals) == 1
     assert agent.pending_proposals[0].command == "docker exec test-container node -v"
-    assert agent.pending_proposals[0].target == "cave/100"
+    assert agent.pending_proposals[0].target == "pve-node-01/100"
 
 
 @pytest.mark.asyncio
@@ -689,10 +689,10 @@ async def test_command_tools_include_summary_and_justification(test_env):
         id="call_guest_1",
         name="run_guest_command",
         arguments={
-            "node": "cave",
+            "node": "pve-node-01",
             "vmid": 100,
-            "command": "docker exec audiobookshelf-1 node -e 'console.log(1)'",
-            "summary": "Inspect audiobookshelf items via node runtime",
+            "command": "docker exec webapp-1 node -e 'console.log(1)'",
+            "summary": "Inspect webapp items via node runtime",
             "justification": "sqlite3 binary not available in PATH inside container",
         },
     )
@@ -704,15 +704,15 @@ async def test_command_tools_include_summary_and_justification(test_env):
     )
 
     agent_with_provider = LLMAgent(cfg, audit, provider=mock_provider, usage=usage)
-    res = await agent_with_provider.chat("Check audiobookshelf", chat_id="justification_test")
+    res = await agent_with_provider.chat("Check webapp", chat_id="justification_test")
 
     assert "I need permission to execute" in res
     assert len(agent_with_provider.pending_proposals) == 1
     prop = agent_with_provider.pending_proposals[0]
-    assert prop.summary == "Inspect audiobookshelf items via node runtime"
+    assert prop.summary == "Inspect webapp items via node runtime"
     assert prop.justification == "sqlite3 binary not available in PATH inside container"
-    assert prop.command == "docker exec audiobookshelf-1 node -e 'console.log(1)'"
-    assert prop.target == "cave/100"
+    assert prop.command == "docker exec webapp-1 node -e 'console.log(1)'"
+    assert prop.target == "pve-node-01/100"
 
 
 

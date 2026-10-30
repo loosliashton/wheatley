@@ -18,7 +18,7 @@ from wheatley.llm.base import BaseLLMProvider, LLMResponse, ToolCall
 
 CONFIG_YAML = """
 nodes:
-  - name: cave
+  - name: pve-node-01
     api_url: "https://127.0.0.1:8006"
     ssh:
       host: "127.0.0.1"
@@ -47,7 +47,7 @@ checks:
     enabled: true
     interval_seconds: 60
     params:
-      guest: "cave/100"
+      guest: "pve-node-01/100"
       containers: "*"
       exclude: []
 """
@@ -123,7 +123,7 @@ async def test_agent_propose_check_config_update(tmp_path: Path):
                         arguments={
                             "check_id": "docker-containers",
                             "action": "add_exclude",
-                            "values": ["seedboxapi", "floatplane-downloader"],
+                            "values": ["backup-cron", "log-rotator"],
                             "summary": "Exclude stopped containers",
                         },
                     )
@@ -141,7 +141,7 @@ async def test_agent_propose_check_config_update(tmp_path: Path):
     )
 
     agent = LLMAgent(config=cfg, audit=audit, approvals=approvals, provider=mock_provider)
-    await agent.chat("Ignore seedboxapi and floatplane-downloader")
+    await agent.chat("Ignore backup-cron and log-rotator")
 
     # Verify proposal created
     props = approvals.get_active_proposals()
@@ -150,7 +150,7 @@ async def test_agent_propose_check_config_update(tmp_path: Path):
     assert props[0].target == str(checks_file)
 
     payload = json.loads(props[0].command)
-    assert "+        - seedboxapi" in payload["diff"] or "+        - \"seedboxapi\"" in payload["diff"]
+    assert "+        - backup-cron" in payload["diff"] or "+        - \"backup-cron\"" in payload["diff"]
 
 
 @pytest.mark.asyncio
@@ -176,7 +176,7 @@ async def test_telegram_approves_config_update(tmp_path: Path):
     bot._send_or_reply = AsyncMock()
 
     # Create config update proposal
-    new_yaml = CHECKS_YAML.replace("exclude: []", 'exclude:\n        - "seedboxapi"')
+    new_yaml = CHECKS_YAML.replace("exclude: []", 'exclude:\n        - "backup-cron"')
     prop = approvals.create_proposal(
         proposal_type="CONFIG_UPDATE",
         target=str(checks_file),
@@ -184,9 +184,9 @@ async def test_telegram_approves_config_update(tmp_path: Path):
             "file": str(checks_file),
             "check_id": "docker-containers",
             "new_yaml": new_yaml,
-            "diff": "+ seedboxapi",
+            "diff": "+ backup-cron",
         }),
-        summary="Add seedboxapi to exclude list",
+        summary="Add backup-cron to exclude list",
     )
 
     query = MagicMock(spec=CallbackQuery)
@@ -207,12 +207,12 @@ async def test_telegram_approves_config_update(tmp_path: Path):
 
     # 1. Verify checks.yaml file was actually updated on disk
     updated_content = checks_file.read_text(encoding="utf-8")
-    assert "seedboxapi" in updated_content
+    assert "backup-cron" in updated_content
 
     # 2. Verify check engine was reloaded
     docker_check = engine.checks.get("docker-containers")
     assert docker_check is not None
-    assert "seedboxapi" in docker_check.params["exclude"]
+    assert "backup-cron" in docker_check.params["exclude"]
 
     # 3. Verify agent continuation message sent
     mock_agent.chat.assert_called_once()

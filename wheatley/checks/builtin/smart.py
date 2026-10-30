@@ -45,6 +45,29 @@ class SmartCheck(BaseCheck):
                 summary="Missing required 'devices' parameter (e.g. ['/dev/nvme0n1', '/dev/sda'])",
             )
 
+        if devices == ["*"]:
+            scan_res = await context.shell.execute_on_host(node, "smartctl --scan -j", timeout=15)
+            discovered_devs: List[str] = []
+            if scan_res.success and scan_res.stdout.strip():
+                try:
+                    import json
+
+                    scan_data = json.loads(scan_res.stdout)
+                    for d in scan_data.get("devices", []):
+                        name = d.get("name")
+                        if name:
+                            discovered_devs.append(name)
+                except Exception:
+                    pass
+            if not discovered_devs:
+                return CheckResult(
+                    check_id=self.id,
+                    status=CheckStatus.OK,
+                    summary=f"No SMART-capable drives discovered on {node}",
+                    details={"node": node, "devices": {}},
+                )
+            devices = discovered_devs
+
         issues: List[str] = []
         drive_results: Dict[str, str] = {}
 

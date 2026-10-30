@@ -202,7 +202,7 @@ class ShellExecutor:
     async def execute_guest_spec(
         self, guest_spec: str, command: str, timeout: int = 30
     ) -> ShellResult:
-        """Execute inside a guest specified as 'node/vmid' (e.g. 'cave/100')."""
+        """Execute inside a guest specified as 'node/vmid' (e.g. 'pve-node-01/100')."""
         spec = guest_spec.strip()
         if spec.startswith("{guest:") and spec.endswith("}"):
             spec = spec[7:-1].strip()

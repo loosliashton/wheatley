@@ -21,7 +21,7 @@ def mock_context():
     config = WheatleyConfig(
         nodes=[
             NodeConfig(
-                name="cave",
+                name="pve-node-01",
                 api_url="https://192.168.1.111:8006",
                 ssh=NodeSshConfig(host="192.168.1.111", port=22, user="wheatley"),
                 tokens=NodeTokensConfig(monitor="wheatley@pve!bot=sec", ops="wheatley@pve!ops=sec"),
@@ -39,13 +39,13 @@ async def test_docker_check_native_guest(mock_context):
     check = DockerCheck(
         id="docker-test",
         type="docker",
-        params={"guest": "cave/100", "alert_on": ["exited", "unhealthy"]},
+        params={"guest": "pve-node-01/100", "alert_on": ["exited", "unhealthy"]},
     )
 
     # Mock docker ps returning lines of JSON
     docker_output = (
-        '{"Names": "plex", "State": "running", "Status": "Up 2 days (healthy)"}\n'
-        '{"Names": "frigate", "State": "running", "Status": "Up 2 days"}\n'
+        '{"Names": "web-app", "State": "running", "Status": "Up 2 days (healthy)"}\n'
+        '{"Names": "nginx", "State": "running", "Status": "Up 2 days"}\n'
     )
     mock_context.shell.execute_guest_spec = AsyncMock(
         return_value=ShellResult(
@@ -63,12 +63,12 @@ async def test_docker_check_alerts_on_issue(mock_context):
     check = DockerCheck(
         id="docker-test",
         type="docker",
-        params={"guest": "cave/100", "alert_on": ["exited", "unhealthy"]},
+        params={"guest": "pve-node-01/100", "alert_on": ["exited", "unhealthy"]},
     )
 
     docker_output = (
-        '{"Names": "plex", "State": "exited", "Status": "Exited (1) 5 minutes ago"}\n'
-        '{"Names": "frigate", "State": "running", "Status": "Up 2 days"}\n'
+        '{"Names": "web-app", "State": "exited", "Status": "Exited (1) 5 minutes ago"}\n'
+        '{"Names": "nginx", "State": "running", "Status": "Up 2 days"}\n'
     )
     mock_context.shell.execute_guest_spec = AsyncMock(
         return_value=ShellResult(
@@ -78,7 +78,7 @@ async def test_docker_check_alerts_on_issue(mock_context):
 
     res = await check.run(mock_context)
     assert res.status == CheckStatus.CRIT
-    assert "Container 'plex' is EXITED" in res.summary
+    assert "Container 'web-app' is EXITED" in res.summary
 
 
 @pytest.mark.asyncio
@@ -86,12 +86,12 @@ async def test_docker_check_ignores_clean_exited_by_default(mock_context):
     check = DockerCheck(
         id="docker-test",
         type="docker",
-        params={"guest": "cave/100", "alert_on": ["exited", "unhealthy"]},
+        params={"guest": "pve-node-01/100", "alert_on": ["exited", "unhealthy"]},
     )
 
     docker_output = (
         '{"Names": "backup-job", "State": "exited", "Status": "Exited (0) 2 weeks ago"}\n'
-        '{"Names": "plex", "State": "running", "Status": "Up 2 days"}\n'
+        '{"Names": "web-app", "State": "running", "Status": "Up 2 days"}\n'
     )
     mock_context.shell.execute_guest_spec = AsyncMock(
         return_value=ShellResult(
@@ -109,7 +109,7 @@ async def test_docker_check_alerts_on_clean_exited_when_disabled(mock_context):
     check = DockerCheck(
         id="docker-test",
         type="docker",
-        params={"guest": "cave/100", "alert_on": ["exited"], "ignore_exited_0": False},
+        params={"guest": "pve-node-01/100", "alert_on": ["exited"], "ignore_exited_0": False},
     )
 
     docker_output = (
@@ -131,12 +131,12 @@ async def test_systemd_check(mock_context):
     check = SystemdCheck(
         id="sysd-test",
         type="systemd",
-        params={"node": "cave", "units": ["frigate", "pveproxy"]},
+        params={"node": "pve-node-01", "units": ["nginx", "pveproxy"]},
     )
 
     mock_context.shell.execute_on_host = AsyncMock(
         side_effect=[
-            ShellResult(command="systemctl is-active frigate.service", exit_code=0, stdout="active\n", stderr=""),
+            ShellResult(command="systemctl is-active nginx.service", exit_code=0, stdout="active\n", stderr=""),
             ShellResult(command="systemctl is-active pveproxy.service", exit_code=3, stdout="failed\n", stderr=""),
         ]
     )
@@ -152,7 +152,7 @@ async def test_command_check_security_and_execution(mock_context):
     blocked_check = CommandCheck(
         id="cmd-blocked",
         type="command",
-        params={"node": "cave", "command": "reboot"},
+        params={"node": "pve-node-01", "command": "reboot"},
     )
     res_blocked = await blocked_check.run(mock_context)
     assert res_blocked.status == CheckStatus.CRIT
@@ -162,7 +162,7 @@ async def test_command_check_security_and_execution(mock_context):
     valid_check = CommandCheck(
         id="cmd-ok",
         type="command",
-        params={"node": "cave", "command": "uptime", "output_regex": r"load average"},
+        params={"node": "pve-node-01", "command": "uptime", "output_regex": r"load average"},
     )
     mock_context.shell.execute_on_host = AsyncMock(
         return_value=ShellResult(
@@ -178,7 +178,7 @@ async def test_lvm_thin_check(mock_context):
     check = LvmThinCheck(
         id="lvm-test",
         type="lvm_thin",
-        params={"nodes": ["cave"], "warn_percent": 80, "crit_percent": 90},
+        params={"nodes": ["pve-node-01"], "warn_percent": 80, "crit_percent": 90},
     )
 
     pvesm_output = (
@@ -197,7 +197,7 @@ async def test_lvm_thin_check(mock_context):
 
 @pytest.mark.asyncio
 async def test_zfs_check(mock_context):
-    check = ZfsCheck(id="zfs-test", type="zfs", params={"nodes": ["cave"]})
+    check = ZfsCheck(id="zfs-test", type="zfs", params={"nodes": ["pve-node-01"]})
 
     mock_context.shell.execute_on_host = AsyncMock(
         return_value=ShellResult(command="zpool status -x", exit_code=0, stdout="all pools are healthy\n", stderr="")
@@ -221,7 +221,7 @@ async def test_smart_check(mock_context):
     check = SmartCheck(
         id="smart-test",
         type="smart",
-        params={"node": "cave", "devices": ["/dev/nvme0n1", "/dev/sda"]},
+        params={"node": "pve-node-01", "devices": ["/dev/nvme0n1", "/dev/sda"]},
     )
 
     mock_context.shell.execute_on_host = AsyncMock(
@@ -241,7 +241,7 @@ async def test_sensors_check(mock_context):
     check = SensorsCheck(
         id="sensors-test",
         type="sensors",
-        params={"node": "cave", "warn_temp_c": 75, "crit_temp_c": 85},
+        params={"node": "pve-node-01", "warn_temp_c": 75, "crit_temp_c": 85},
     )
 
     sensors_json = {

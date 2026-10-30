@@ -16,33 +16,30 @@ This guide walks you through setting up Wheatley from scratch on your Proxmox VE
 
 ---
 
-## 2. Host Setup
+## 2. Provisioning & Host Setup
 
 Clone Wheatley onto your primary Proxmox VE host:
 
 ```bash
 git clone https://github.com/loosliashton/wheatley.git /root/wheatley
 cd /root/wheatley
+chmod +x install/*.sh
 ```
 
-Run the host setup script on **each** Proxmox VE node you want Wheatley to monitor:
+### Step A: Configure the Primary Proxmox Host
+Run the host setup script on your primary Proxmox VE node:
 
 ```bash
-chmod +x install/*.sh
-./install/host-setup.sh
+./install/host-setup.sh --node-index 1
 ```
 
 This script:
-- Creates a dedicated `wheatley@pve` system user.
-- Generates an API token `wheatley@pve!bot` with `PVEAuditor` read-only privileges on `/`.
-- Generates a local SSH key pair and configures the `wheatley-shell` restricted command wrapper.
-- Displays the API token secret and TLS fingerprint needed for your configuration.
+- Creates a dedicated `wheatley@pve` user and `wheatley@pve!bot` API token with `PVEAuditor` read-only privileges on `/`.
+- Creates a restricted `wheatley` Linux user locked to `/usr/local/bin/wheatley-shell` with narrow sudoers rules.
+- Prints your `NODE1_TOKEN_MONITOR` and `NODE1_TLS_FINGERPRINT` entries for `/etc/wheatley/secrets.env`.
 
----
-
-## 3. Provisioning the Dedicated LXC Container
-
-Create an unprivileged Debian container (CT 110) to run Wheatley:
+### Step B: Provision the Dedicated LXC Container
+Create an unprivileged Debian container (default: `CT 110`) to run Wheatley:
 
 ```bash
 ./install/create-lxc.sh --ip 192.168.1.110/24 --gateway 192.168.1.1
@@ -50,31 +47,36 @@ Create an unprivileged Debian container (CT 110) to run Wheatley:
 
 *Customizable flags: `--ctid <id>`, `--hostname <name>`, `--storage <pool>`, `--bridge <bridge>`, `--memory <mb>`.*
 
+`create-lxc.sh` automatically:
+- Installs `/opt/wheatley`, builds `/opt/wheatley/venv`, and links `/usr/local/bin/wheatley`.
+- Seeds `/etc/wheatley/config.yaml`, `/etc/wheatley/checks.yaml`, and `/etc/wheatley/secrets.env`.
+- Installs and enables `/etc/systemd/system/wheatley.service`.
+- Generates `/var/lib/wheatley/.ssh/id_ed25519` inside the container, authorizes it on the local Proxmox host, and prints the `--ssh-key` command to run on any secondary cluster nodes.
+
+*(Optional) If you have additional Proxmox cluster nodes, run `./install/host-setup.sh --node-index 2 --ssh-key "<pubkey>"` on each secondary node using the public key printed by `create-lxc.sh`.*
+
 ---
 
-## 4. Configuration
+## 3. Configuration
 
-Inside CT 110 (or via `pct enter 110`):
+Enter the container (`pct enter 110`):
 
 1. **Secrets (`/etc/wheatley/secrets.env`):**
    ```bash
-   cp /opt/wheatley/secrets.example.env /etc/wheatley/secrets.env
-   chmod 600 /etc/wheatley/secrets.env
-   chown wheatley:wheatley /etc/wheatley/secrets.env
    nano /etc/wheatley/secrets.env
    ```
-   Add your `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_ID`, LLM keys, and node tokens.
+   Add your `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_ID`, LLM API key, and the `NODE1_TOKEN_MONITOR` / `NODE1_TLS_FINGERPRINT` values printed by `host-setup.sh`.
 
 2. **Configuration (`/etc/wheatley/config.yaml`):**
    ```bash
-   cp /opt/wheatley/config.example.yaml /etc/wheatley/config.yaml
    nano /etc/wheatley/config.yaml
    ```
+   Update your node `name`, `api_url`, and `ssh.host` IP addresses.
 
 3. **Checks Configuration (`/etc/wheatley/checks.yaml`):**
-   Checks must be defined in a separate `checks.yaml` file (enforced by the configuration loader). This isolates cluster nodes and API tokens from check thresholds, and allows Wheatley to conversationally propose and apply updates (e.g. ignoring dormant containers):
+   Checks are stored in `/etc/wheatley/checks.yaml` (enforced by the configuration loader). You can auto-generate checks for your running VMs, containers, and services, or edit the file manually:
    ```bash
-   cp /opt/wheatley/checks.example.yaml /etc/wheatley/checks.yaml
+   wheatley discover --output /etc/wheatley/checks.yaml
    nano /etc/wheatley/checks.yaml
    ```
 
@@ -85,12 +87,12 @@ Inside CT 110 (or via `pct enter 110`):
 
 ---
 
-## 5. Starting the Service
+## 4. Starting the Service
 
-Enable and start the systemd daemon:
+Inside `CT 110`, start the systemd daemon:
 
 ```bash
-systemctl enable --now wheatley
+systemctl start wheatley
 systemctl status wheatley
 ```
 

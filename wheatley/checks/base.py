@@ -55,7 +55,7 @@ class CheckContext:
         return self.clients.get(node_name)
 
     def resolve_guest_ip(self, guest_spec: str) -> Optional[str]:
-        """Resolves guest specification e.g. 'cave/102' to a live IPv4 address."""
+        """Resolves guest specification e.g. 'pve-node-01/102' to a live IPv4 address."""
         spec = guest_spec.strip()
         if spec.startswith("{guest:") and spec.endswith("}"):
             spec = spec[7:-1].strip()

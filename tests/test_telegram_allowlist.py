@@ -30,7 +30,7 @@ async def test_send_allowlist_proposal(mock_bot):
         proposal_id="prop_test123",
         summary="Check SMART disk data",
         command="smartctl -a /dev/sda",
-        target="cave",
+        target="pve-node-01",
         risk="LOW",
         proposal_type="ALLOWLIST_RULE",
         pattern="smartctl -a *",
@@ -45,12 +45,12 @@ async def test_send_allowlist_proposal(mock_bot):
     keyboard = kwargs["reply_markup"]
     assert keyboard is not None
     buttons = keyboard.inline_keyboard
-    # Row 1: [Run Once, Always Allow on cave]
+    # Row 1: [Run Once, Always Allow on pve-node-01]
     # Row 2: [Deny]
     assert len(buttons) == 2
     assert buttons[0][0].text == "⚡ Run Once"
     assert buttons[0][0].callback_data == "allow_once:prop_test123"
-    assert "Always Allow on cave" in buttons[0][1].text
+    assert "Always Allow on pve-node-01" in buttons[0][1].text
     assert buttons[0][1].callback_data == "allow_always:prop_test123"
     assert buttons[1][0].text == "❌ Deny"
     assert buttons[1][0].callback_data == "deny:prop_test123"
@@ -75,7 +75,7 @@ async def test_cmd_allowlist_empty_and_populated(mock_bot):
     # 2. Add proposal and resolve with ALLOW_ALWAYS
     prop = mock_bot.approvals.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave/101",
+        target="pve-node-01/101",
         command="snapraid status",
         summary="snapraid rule",
         pattern="snapraid status *",
@@ -87,7 +87,7 @@ async def test_cmd_allowlist_empty_and_populated(mock_bot):
     await mock_bot._cmd_allowlist(update, context)
     msg = mock_bot._send_or_reply.call_args[0][0]
     assert "Active User Allowlist Rules (1)" in msg
-    assert "cave/101" in msg
+    assert "pve-node-01/101" in msg
     assert "snapraid status *" in msg
 
 
@@ -95,7 +95,7 @@ async def test_cmd_allowlist_empty_and_populated(mock_bot):
 async def test_callback_allow_once(mock_bot):
     prop = mock_bot.approvals.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave",
+        target="pve-node-01",
         command="smartctl -a /dev/sda",
         summary="Check disk smart status",
         pattern="smartctl -a *",
@@ -127,14 +127,14 @@ async def test_callback_allow_once(mock_bot):
     assert updated_prop.status == "APPROVED"
     assert updated_prop.executed_at is not None
     # Verify execute_on_host called
-    mock_bot.shell.execute_on_host.assert_called_once_with("cave", "smartctl -a /dev/sda", timeout=30)
+    mock_bot.shell.execute_on_host.assert_called_once_with("pve-node-01", "smartctl -a /dev/sda", timeout=30)
 
 
 @pytest.mark.asyncio
 async def test_callback_resumes_agent_with_output(mock_bot):
     prop = mock_bot.approvals.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave/101",
+        target="pve-node-01/101",
         command="systemctl list-timers",
         summary="List timers",
         pattern="systemctl list-timers *",
@@ -194,7 +194,7 @@ async def test_proposals_dispatched_after_llm_message(mock_bot):
     # Create dummy proposal
     prop = mock_bot.approvals.create_proposal(
         proposal_type="ACTION",
-        target="doug/200",
+        target="pve-node-02/200",
         command="pct restart 200",
         summary="Restart homeassistant",
         risk="MEDIUM",

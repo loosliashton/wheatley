@@ -99,7 +99,6 @@ class BudgetConfig(BaseModel):
 class TelegramConfig(BaseModel):
     bot_token: str
     allowed_user_ids: List[int]
-    pin: Optional[str] = None
 
     @field_validator("allowed_user_ids", mode="before")
     @classmethod
@@ -154,7 +153,7 @@ class HealthConfig(BaseModel):
 
 class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
-    self_guest: Optional[str] = Field(None, description="e.g. cave/110 to protect agent self")
+    self_guest: Optional[str] = Field(None, description="e.g. pve-node-01/110 to protect agent self")
     llm: LLMConfig = Field(default_factory=LLMConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     chat: ChatConfig

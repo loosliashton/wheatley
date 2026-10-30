@@ -21,7 +21,7 @@ checks:
     enabled: true
     interval_seconds: 60
     params:
-      guest: "cave/100"
+      guest: "pve-node-01/100"
       containers: "*"
       exclude:
         - "temp-worker"
@@ -38,12 +38,12 @@ def test_add_exclude_preserves_comments(tmp_path: Path):
         file_path=yaml_file,
         check_id="docker-containers",
         action="add_exclude",
-        values=["seedboxapi", "floatplane-downloader"],
+        values=["backup-cron", "log-rotator"],
     )
 
     # 1. Verify content added
-    assert "seedboxapi" in new_yaml
-    assert "floatplane-downloader" in new_yaml
+    assert "backup-cron" in new_yaml
+    assert "log-rotator" in new_yaml
     assert "temp-worker" in new_yaml
 
     # 2. Verify comments preserved
@@ -51,13 +51,13 @@ def test_add_exclude_preserves_comments(tmp_path: Path):
     assert "# Docker containers" in new_yaml
 
     # 3. Verify diff generated
-    assert "+        - seedboxapi" in diff or "+        - \"seedboxapi\"" in diff
+    assert "+        - backup-cron" in diff or "+        - \"backup-cron\"" in diff
     assert "--- a/checks.yaml" in diff
 
     # 4. Verify Pydantic validation passed
     assert len(configs) == 2
     docker_cfg = next(c for c in configs if c.id == "docker-containers")
-    assert "seedboxapi" in docker_cfg.params["exclude"]
+    assert "backup-cron" in docker_cfg.params["exclude"]
     assert "temp-worker" in docker_cfg.params["exclude"]
 
 

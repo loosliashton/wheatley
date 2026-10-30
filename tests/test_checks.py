@@ -28,19 +28,19 @@ def fake_context():
         {"storage": "local-lvm", "total": 100 * 1024**3, "used": 40 * 1024**3, "active": 1}
     ]
     mock_client.get_guests.return_value = [
-        {"vmid": 102, "name": "plex", "type": "lxc", "status": "running"},
-        {"vmid": 107, "name": "frigate", "type": "lxc", "status": "running"},
+        {"vmid": 102, "name": "web-app", "type": "lxc", "status": "running"},
+        {"vmid": 107, "name": "media-server", "type": "lxc", "status": "running"},
     ]
     mock_client.get_guest_ips.return_value = ["192.168.1.102"]
     mock_client.get_guest_config.return_value = {"onboot": 1}
 
-    clients = {"cave": mock_client}
+    clients = {"pve-node-01": mock_client}
     return CheckContext(cfg, clients)
 
 
 @pytest.mark.asyncio
 async def test_guest_ip_resolution(fake_context):
-    url = "http://{guest:cave/102}:32400/identity"
+    url = "http://{guest:pve-node-01/102}:32400/identity"
     resolved = fake_context.resolve_string(url)
     assert resolved == "http://192.168.1.102:32400/identity"
 
@@ -113,18 +113,18 @@ async def test_node_metrics_check_ok(fake_context):
     chk_cfg = CheckConfig(
         id="test-node",
         type="node_metrics",
-        params={"nodes": ["cave"], "cpu_crit_percent": 90, "mem_crit_percent": 90},
+        params={"nodes": ["pve-node-01"], "cpu_crit_percent": 90, "mem_crit_percent": 90},
     )
     check = NodeMetricsCheck(chk_cfg)
     res = await check.run(fake_context)
     assert res.status == CheckStatus.OK
-    assert "cave_cpu_pct" in res.metrics
-    assert res.metrics["cave_cpu_pct"] == 25.0
+    assert "pve-node-01_cpu_pct" in res.metrics
+    assert res.metrics["pve-node-01_cpu_pct"] == 25.0
 
 
 @pytest.mark.asyncio
 async def test_node_metrics_check_cpu_crit(fake_context):
-    client = fake_context.get_client("cave")
+    client = fake_context.get_client("pve-node-01")
     client.get_node_status.return_value = {
         "cpu": 0.95,
         "memory": {"used": 4 * 1024**3, "total": 16 * 1024**3},
@@ -132,7 +132,7 @@ async def test_node_metrics_check_cpu_crit(fake_context):
     chk_cfg = CheckConfig(
         id="test-node-crit",
         type="node_metrics",
-        params={"nodes": ["cave"], "cpu_crit_percent": 90, "mem_crit_percent": 90},
+        params={"nodes": ["pve-node-01"], "cpu_crit_percent": 90, "mem_crit_percent": 90},
     )
     check = NodeMetricsCheck(chk_cfg)
     res = await check.run(fake_context)
@@ -145,14 +145,14 @@ async def test_storage_check(fake_context):
     chk_cfg = CheckConfig(
         id="test-storage",
         type="storage",
-        params={"nodes": ["cave"], "warn_percent": 80, "crit_percent": 90},
+        params={"nodes": ["pve-node-01"], "warn_percent": 80, "crit_percent": 90},
     )
     check = StorageCheck(chk_cfg)
     res = await check.run(fake_context)
     assert res.status == CheckStatus.OK
 
     # Simulate storage pool at 96%
-    client = fake_context.get_client("cave")
+    client = fake_context.get_client("pve-node-01")
     client.get_storage.return_value = [
         {"storage": "local-lvm", "total": 100 * 1024**3, "used": 96 * 1024**3, "active": 1}
     ]
@@ -173,13 +173,13 @@ async def test_guest_state_check(fake_context):
     assert res.status == CheckStatus.OK
 
     # Simulate guest stopped
-    client = fake_context.get_client("cave")
+    client = fake_context.get_client("pve-node-01")
     client.get_guests.return_value = [
-        {"vmid": 102, "name": "plex", "type": "lxc", "status": "stopped"},
+        {"vmid": 102, "name": "web-app", "type": "lxc", "status": "stopped"},
     ]
     res_stopped = await check.run(fake_context)
     assert res_stopped.status == CheckStatus.CRIT
-    assert "plex" in res_stopped.summary
+    assert "web-app" in res_stopped.summary
 
 
 @pytest.mark.asyncio

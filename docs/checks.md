@@ -10,7 +10,7 @@ Checks must be defined in a dedicated checks configuration file (default: `/etc/
 
 1. **Security Isolation:** `/etc/wheatley/config.yaml` (cluster nodes, tokens, bot credentials) stays immutable and read-only.
 2. **Conversational Tuning:** You can ask Wheatley directly in chat:
-   > *"Ignore seedboxapi in the docker check"*
+   > *"Ignore backup-cron in the docker check"*
 3. **Interactive Human Approval:** Wheatley generates a roundtrip YAML diff and presents an interactive proposal card with **[✅ Approve Update]** and **[❌ Deny]**.
 4. **Zero-Downtime Hot-Reload:** When approved, Wheatley creates a backup in `/var/lib/wheatley/backups/`, applies the update atomically to `checks.yaml`, and reloads the check engine live without restarting the daemon.
 
@@ -27,7 +27,7 @@ Monitors CPU and RAM utilization across cluster nodes via the PVE REST API.
   enabled: true
   interval_seconds: 60
   params:
-    nodes: "*"                 # "*" for all configured nodes, or a list ["cave", "doug"]
+    nodes: "*"                 # "*" for all configured nodes, or a list ["pve-node-01", "pve-node-02"]
     cpu_warn_percent: 80       # warning threshold (default: 80)
     cpu_crit_percent: 90       # critical threshold (default: 90)
     mem_warn_percent: 80       # warning threshold (default: 80)
@@ -60,23 +60,23 @@ Verifies that VMs and LXC containers (such as those marked `onboot: 1`) are in t
     select:
       onboot: true             # monitor all guests configured to start on boot
     exclude:
-      - "cave/999"             # optional guest specs ("<node>/<vmid>") to ignore
+      - "pve-node-01/999"      # optional guest specs ("<node>/<vmid>") to ignore
 ```
 
 ### 4. `http`
 Performs HTTP/HTTPS health checks with support for status code validation, TLS verification control, response body substring matching, and `{guest:node/vmid}` dynamic IP resolution.
 
 ```yaml
-- id: plex
+- id: web-app
   type: http
   enabled: true
   interval_seconds: 60
   params:
-    url: "http://{guest:cave/102}:32400/identity"
-    expected_status: 200       # HTTP status code (default: 200)
-    timeout_seconds: 10        # request timeout in seconds (default: 10)
+    url: "http://{guest:pve-node-01/102}:8080/health"
+    expected_status: [200]     # HTTP status code or list of codes (default: [200])
+    timeout_seconds: 5         # request timeout in seconds (default: 5.0)
     tls_verify: true           # whether to verify TLS certs (default: true)
-    body_contains: "MediaContainer"  # optional substring requirement
+    match_body: "ok"           # optional substring requirement (alias: body_contains)
 ```
 
 ### 5. `tcp`
@@ -88,7 +88,7 @@ Checks raw TCP port connectivity (ideal for databases, MQTT brokers, Redis, SSH)
   enabled: true
   interval_seconds: 60
   params:
-    host: "{guest:cave/105}"
+    host: "{guest:pve-node-01/105}"
     port: 1883
     timeout_seconds: 5         # timeout in seconds (default: 5)
 ```
@@ -102,7 +102,7 @@ Monitors Docker container health and restart loops on a Docker host (LXC or VM) 
   enabled: true
   interval_seconds: 60
   params:
-    guest: "cave/100"          # guest spec ("<node>/<vmid>") running Docker
+    guest: "pve-node-01/100"   # guest spec ("<node>/<vmid>") running Docker
     containers: "*"            # "*" for all containers or list of names
     exclude: []                # list of container names to ignore
     ignore_exited_0: true      # treat clean Exited (0) as healthy (default: true)
@@ -114,7 +114,7 @@ Monitors Docker container health and restart loops on a Docker host (LXC or VM) 
 ```
 
 ### 7. `command`
-Executes an arbitrary read-only diagnostic command inside a guest or on a host node and evaluates exit code and output.
+Executes an allowlisted read-only diagnostic command inside a guest or on a host node and evaluates exit code and output.
 
 ```yaml
 - id: snapraid-status
@@ -122,22 +122,24 @@ Executes an arbitrary read-only diagnostic command inside a guest or on a host n
   enabled: true
   interval_seconds: 3600
   params:
-    guest: "cave/101"          # guest spec or host node name
+    guest: "pve-node-01/101"   # guest spec ("<node>/<vmid>"), or use 'node: "pve-node-01"'
     command: "snapraid status"
     timeout_seconds: 30
-    expect_exit_code: 0
+    expected_exit_code: 0      # expected exit code (alias: expect_exit_code)
+    output_regex: "No error"   # optional regex that output must match
+    fail_on_regex: "DANGER"    # optional regex that triggers failure if matched
 ```
 
 ### 8. `systemd`
 Verifies that specific systemd units on a host node or inside a guest are `active (running)`.
 
 ```yaml
-- id: frigate-systemd
+- id: docker-systemd
   type: systemd
   enabled: true
   interval_seconds: 60
   params:
-    guest: "cave/107"
+    guest: "pve-node-01/107"   # guest spec ("<node>/<vmid>"), or use 'node: "pve-node-01"'
     units:
       - "docker.service"
 ```
@@ -151,8 +153,8 @@ Monitors ZFS storage pool health (`ONLINE`, `DEGRADED`, scrub errors).
   enabled: true
   interval_seconds: 300
   params:
-    node: "cave"
-    pools: "*"                 # "*" for all pools or list of pool names
+    nodes: "*"                 # "*" for all nodes, node name, or list of nodes
+    pool: "tank"               # optional pool name (omit or "*" for all pools)
 ```
 
 ### 10. `smart`
@@ -164,8 +166,39 @@ Monitors disk SMART health status (`PASSED` / `FAILED`) using `smartctl`.
   enabled: true
   interval_seconds: 3600
   params:
-    node: "cave"
-    devices: "*"               # scan all devices or specify ["/dev/sda", "/dev/nvme0n1"]
+    node: "pve-node-01"
+    devices:                   # list of device paths, or "*" to scan all drives
+      - "/dev/nvme0n1"
+      - "/dev/sda"
+```
+
+### 11. `lvm_thin`
+Monitors LVM Thin storage pool capacity across Proxmox VE hosts via `pvesm status` (with API fallback) and alerts before data/metadata exhaustion.
+
+```yaml
+- id: lvm-thin-health
+  type: lvm_thin
+  enabled: true
+  interval_seconds: 120
+  params:
+    nodes: "*"                 # "*" for all nodes or list of node names
+    pool: "local-lvm"          # optional specific thin pool name
+    warn_percent: 80           # warning threshold (default: 80.0)
+    crit_percent: 90           # critical threshold (default: 90.0)
+```
+
+### 12. `sensors`
+Monitors CPU, NVMe, and motherboard temperatures on a Proxmox VE host via `sensors -j` (`lm-sensors`).
+
+```yaml
+- id: host-temps
+  type: sensors
+  enabled: true
+  interval_seconds: 60
+  params:
+    node: "pve-node-01"
+    warn_temp_c: 80            # warning temperature in °C (default: 80.0)
+    crit_temp_c: 90            # critical temperature in °C (default: 90.0)
 ```
 
 ---
@@ -173,7 +206,7 @@ Monitors disk SMART health status (`PASSED` / `FAILED`) using `smartctl`.
 ## Dynamic IP Resolution: `{guest:node/vmid}`
 
 Wheatley supports dynamic IP resolution in check URLs and hostnames:
-- `{guest:cave/102}` dynamically queries Proxmox API / guest agent for the primary IPv4 address of guest `102` on node `cave`.
+- `{guest:pve-node-01/102}` dynamically queries Proxmox API / guest agent for the primary IPv4 address of guest `102` on node `pve-node-01`.
 - This ensures your checks survive DHCP lease renewals or network subnet migrations without manually reconfiguring URLs.
 
 ---

@@ -369,7 +369,7 @@ class TelegramBot(ChatInterface):
             check_ids = [f"`{s['id']}`" for s in states]
             msg = (
                 "⚙️ [SYSTEM] *Usage:* `/mute <check_id> [minutes]`\n"
-                "Example: `/mute plex 120` (default: 60 minutes)\n\n"
+                "Example: `/mute web-app 120` (default: 60 minutes)\n\n"
                 f"Available checks: {', '.join(check_ids) if check_ids else 'None'}"
             )
             await self._send_or_reply(msg, target=update.message)
@@ -381,7 +381,7 @@ class TelegramBot(ChatInterface):
             try:
                 minutes = int(args[1])
             except ValueError:
-                await self._send_or_reply("⚙️ [SYSTEM] Minutes must be a whole number, e.g. `/mute plex 60`", target=update.message)
+                await self._send_or_reply("⚙️ [SYSTEM] Minutes must be a whole number, e.g. `/mute web-app 60`", target=update.message)
                 return
 
         until = self.check_engine.mute_check(check_id, minutes)
@@ -444,7 +444,7 @@ class TelegramBot(ChatInterface):
             return
         args = context.args or []
         if not args:
-            await self._send_or_reply("⚙️ [SYSTEM] *Usage:* `/investigate <check_id>` (e.g. `/investigate plex`)", target=update.message)
+            await self._send_or_reply("⚙️ [SYSTEM] *Usage:* `/investigate <check_id>` (e.g. `/investigate web-app`)", target=update.message)
             return
 
         check_id = args[0]
@@ -561,18 +561,14 @@ class TelegramBot(ChatInterface):
             )
 
     async def _schedule_service_restart(self, delay_seconds: float = 2.0) -> None:
-        """Schedules a detached systemctl restart after a delay so that Telegram messages are delivered."""
+        """Schedules a clean daemon exit after a delay so systemd (Restart=always) restarts the service."""
         await asyncio.sleep(delay_seconds)
         try:
-            import subprocess
+            import os
+            import signal
 
-            logger.info("Triggering detached service restart for wheatley.service...")
-            subprocess.Popen(
-                ["sudo", "-n", "systemctl", "restart", "wheatley"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            logger.info("Triggering clean process exit (SIGTERM) for systemd service restart...")
+            os.kill(os.getpid(), signal.SIGTERM)
         except Exception as e:
             logger.error("Failed to trigger service restart: %s", e)
 

@@ -12,6 +12,7 @@ secrets.env
 
 # Local configurations with machine-specific IPs/VMIDs
 config.yaml
+checks.yaml
 
 # SQLite databases & runtime locks
 *.db

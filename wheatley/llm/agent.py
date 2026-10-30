@@ -104,7 +104,7 @@ class LLMAgent:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "node": {"type": "string", "description": "Node name (e.g. cave, doug)"},
+                        "node": {"type": "string", "description": "Node name (e.g. pve-node-01, pve-node-02)"},
                         "vmid": {"type": "integer", "description": "Virtual Machine or Container ID"},
                     },
                     "required": ["node", "vmid"],
@@ -121,7 +121,7 @@ class LLMAgent:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "check_id": {"type": "string", "description": "Check ID (e.g. plex, frigate, node-health)"},
+                        "check_id": {"type": "string", "description": "Check ID (e.g. web-app, docker-containers, node-health)"},
                     },
                     "required": ["check_id"],
                 },
@@ -139,7 +139,7 @@ class LLMAgent:
             ToolDefinition(
                 name="run_host_command",
                 description=(
-                    "Execute a read-only diagnostics command directly on a Proxmox host node (e.g. 'cave'). "
+                    "Execute a read-only diagnostics command directly on a Proxmox host node (e.g. 'pve-node-01'). "
                     "Permitted commands include: uptime, free -m, df -h, journalctl -n 20, systemctl status <unit>, "
                     "pvesm status, smartctl -H <device>, sensors -j, zpool status, etc. "
                     "Any non-allowlisted or mutating command is blocked and automatically converted to an action proposal."
@@ -147,7 +147,7 @@ class LLMAgent:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "node": {"type": "string", "description": "Target Proxmox node name (e.g. cave, doug)"},
+                        "node": {"type": "string", "description": "Target Proxmox node name (e.g. pve-node-01, pve-node-02)"},
                         "command": {"type": "string", "description": "Shell command to execute on the host"},
                         "summary": {
                             "type": "string",
@@ -171,12 +171,12 @@ class LLMAgent:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "node": {"type": "string", "description": "Host node where the guest resides (e.g. cave)"},
+                        "node": {"type": "string", "description": "Host node where the guest resides (e.g. pve-node-01)"},
                         "vmid": {"type": "integer", "description": "Virtual Machine or Container ID (e.g. 100, 102)"},
                         "command": {"type": "string", "description": "Shell command to execute inside the guest"},
                         "summary": {
                             "type": "string",
-                            "description": "Clear plain-English summary of what the command does (e.g. 'Count media items in audiobookshelf database')",
+                            "description": "Clear plain-English summary of what the command does (e.g. 'Check active connections in database container')",
                         },
                         "justification": {
                             "type": "string",
@@ -192,7 +192,7 @@ class LLMAgent:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string", "description": "Target host or guest (e.g. cave/108)"},
+                        "target": {"type": "string", "description": "Target host or guest (e.g. pve-node-01/108)"},
                         "command": {"type": "string", "description": "Exact shell command to execute"},
                         "summary": {"type": "string", "description": "Plain English summary of what will happen"},
                         "risk": {"type": "string", "description": "Risk level: LOW, MEDIUM, or HIGH"},

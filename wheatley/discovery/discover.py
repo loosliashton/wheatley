@@ -216,7 +216,7 @@ class InventoryDiscovery:
         is_self = False
         if self.config.self_guest and self.config.self_guest == f"{client.name}/{vmid}":
             is_self = True
-        elif name.lower() in ("wheatley", "sentinel"):
+        elif name.lower() == "wheatley":
             is_self = True
 
         has_docker = "docker" in name.lower() or "docker" in guest_cfg.get("description", "").lower()
@@ -372,6 +372,11 @@ class InventoryDiscovery:
         }
         return draft
 
+    def generate_checks_config(self, guests: List[DiscoveredGuest]) -> Dict[str, Any]:
+        """Generate a standalone checks.yaml dictionary containing discovered checks."""
+        draft = self.generate_draft_config(guests)
+        return {"checks": draft["checks"]}
+
     def format_summary_markdown(self, guests: List[DiscoveredGuest]) -> str:
         """Format discovery results as rich markdown."""
         lines = ["🔍 *Wheatley Auto-Discovery Summary*\n"]
@@ -405,6 +410,6 @@ class InventoryDiscovery:
             f"• *Discovered Services:* `{total_services}`",
             f"• *Docker Hosts:* `{len([g for g in guests if g.has_docker])}`",
             f"• *Excluded Inactive Clones:* `{len([g for g in guests if g.status == 'stopped' and any(kw in g.name.lower() for kw in ('ha', 'backup', 'clone'))])}`",
-            "\nRun `wheatley discover --output /etc/wheatley/config.draft.yaml` to export.",
+            "\nRun `wheatley discover --output /etc/wheatley/checks.yaml` to export.",
         ])
         return "\n".join(lines)

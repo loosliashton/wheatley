@@ -24,18 +24,33 @@ Wheatley employs defense-in-depth across the operating system, container runtime
    - Commands must be passed non-interactively via SSH (`SSH_ORIGINAL_COMMAND`).
 
 4. **Narrow Sudoers Permissions:**
-   - Sudoers rules in `/etc/sudoers.d/wheatley` on monitored hosts are strictly restricted to read-only diagnostics and guest exec wrappers:
+   - Sudoers rules in `/etc/sudoers.d/wheatley` on monitored hosts are strictly restricted to read-only diagnostics, guest exec wrappers, and non-destructive guest lifecycle operations:
      ```sudoers
      wheatley ALL=(ALL) NOPASSWD: \
          /usr/sbin/pct exec *, \
+         /usr/sbin/pct start *, \
+         /usr/sbin/pct stop *, \
+         /usr/sbin/pct restart *, \
+         /usr/sbin/pct reboot *, \
+         /usr/sbin/pct shutdown *, \
          /usr/sbin/qm guest exec *, \
+         /usr/sbin/qm start *, \
+         /usr/sbin/qm stop *, \
+         /usr/sbin/qm reboot *, \
+         /usr/sbin/qm shutdown *, \
+         /usr/sbin/qm reset *, \
          /usr/sbin/pvesm status*, \
+         /usr/sbin/pvesm list*, \
          /usr/sbin/zpool status*, \
          /usr/sbin/zpool list*, \
          /usr/sbin/smartctl *, \
          /usr/bin/sensors *, \
          /bin/systemctl status *, \
          /usr/bin/systemctl status *, \
+         /bin/systemctl is-active *, \
+         /usr/bin/systemctl is-active *, \
+         /bin/systemctl is-failed *, \
+         /usr/bin/systemctl is-failed *, \
          /bin/journalctl *, \
          /usr/bin/journalctl *, \
          /bin/df *, \
@@ -43,10 +58,10 @@ Wheatley employs defense-in-depth across the operating system, container runtime
          /usr/bin/uptime, \
          /usr/bin/free *
      ```
-   - Wheatley has no arbitrary root execution rights on the Proxmox host.
+   - Wheatley has no arbitrary root execution rights or destructive VM/CT deletion rights on the Proxmox host.
 
 5. **Self-Guest Protection:**
-   - The `self_guest` configuration parameter (e.g. `self_guest: "cave/110"`) protects Wheatley's own container.
+   - The `self_guest` configuration parameter (e.g. `self_guest: "pve-node-01/110"`) protects Wheatley's own container.
    - Wheatley refuses to stop, restart, or execute mutating actions against its own container, preventing accidental self-termination.
 
 ---
@@ -66,9 +81,8 @@ Any action that alters system state (such as restarting guests, restarting syste
    - **[⚡ Run Once]**: Grants one-time execution for this turn.
    - **[🛡 Always Allow on <target>]**: Permanently adds the rule to the target-scoped allowlist in SQLite.
    - **[❌ Deny]**: Halts the proposed action immediately.
-3. **Optional PIN Verification:** If `pin:` is configured in `config.yaml` (`${HIGH_RISK_PIN}`), high-risk operations require entry of the security PIN before execution.
-4. **Automatic Expiration:** Proposals expire automatically after 15 minutes if not approved.
-5. **Post-Execution Reporting:** If approved, Wheatley executes the command via `ShellExecutor` and reports the stdout/stderr back into the conversation for continued AI synthesis.
+3. **Automatic Expiration:** Proposals expire automatically after 15 minutes if not approved.
+4. **Post-Execution Reporting:** If approved, Wheatley executes the command via `ShellExecutor` and reports the stdout/stderr back into the conversation for continued AI synthesis.
 
 ---
 
@@ -81,7 +95,7 @@ When the LLM encounters a diagnostic command not present on the default allowlis
 2. **Interactive Allowlist Card:**
    Wheatley delivers the proposal card directly to Telegram, allowing the administrator to inspect the proposed command.
 3. **Target-Scoped Permissions:**
-   Approved commands can be scoped strictly to the specific guest or node (`cave/100`), preventing unintended execution on other nodes.
+   Approved commands can be scoped strictly to the specific guest or node (`pve-node-01/100`), preventing unintended execution on other nodes.
 4. **Allowlist Management:**
    - `/allowlist` — Lists all active custom rules, target scopes, and approval timestamps.
    - `/allowlist revoke <id>` — Immediately removes a custom allowlist rule from the SQLite database.

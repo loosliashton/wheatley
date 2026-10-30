@@ -284,11 +284,16 @@ def cmd_discover(args: argparse.Namespace) -> None:
 
         if getattr(args, "output", None):
             draft = discovery.generate_draft_config(guests)
+            checks_payload = {"checks": draft["checks"]}
             out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(draft, f, sort_keys=False, default_flow_style=False)
-            print(f"✅ Recommended draft configuration written to: {out_path}\n")
+                yaml.safe_dump(checks_payload, f, sort_keys=False, default_flow_style=False)
+            print(f"✅ Recommended checks configuration written to: {out_path}")
+            detected_self = draft.get("self_guest")
+            if detected_self and detected_self != cfg.self_guest:
+                print(f"💡 Detected Wheatley guest at '{detected_self}' — set 'self_guest: \"{detected_self}\"' in config.yaml.")
+            print()
 
         print(discovery.format_summary_markdown(guests))
         sys.exit(0)
@@ -493,7 +498,7 @@ def main() -> None:
     p_disc = subparsers.add_parser("discover", help="Scan Proxmox nodes and auto-discover guests/services")
     p_disc.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
     p_disc.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
-    p_disc.add_argument("--output", "-o", help="Path to write recommended draft config.yaml")
+    p_disc.add_argument("--output", "-o", help="Path to write recommended checks.yaml file")
     p_disc.add_argument("--json", action="store_true", help="Output discovered inventory as JSON")
 
     # Config validate

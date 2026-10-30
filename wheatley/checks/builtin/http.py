@@ -36,7 +36,7 @@ class HttpCheck(BaseCheck):
 
         timeout = float(self.params.get("timeout_seconds", 5.0))
         tls_verify = bool(self.params.get("tls_verify", True))
-        match_body = self.params.get("match_body")
+        match_body = self.params.get("match_body") or self.params.get("body_contains")
         method = self.params.get("method", "GET").upper()
 
         start_time = time.perf_counter()

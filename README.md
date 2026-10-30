@@ -17,6 +17,18 @@ Wheatley is an autonomous administration agent purpose-built for homelab operato
 
 ---
 
+<details>
+  <summary><b>Screenshot Examples</b></summary>
+  <br>
+
+| Mutating Approval Gate | Command Allowlist Proposal | Information Fetch |
+| :---: | :---: | :---: |
+| <img width="280" alt="Screenshot_20261030_143707_Telegram" src="https://github.com/user-attachments/assets/c59341a4-d1e9-48da-9c84-d220d973ca77" /> | <img width="280" alt="Screenshot_20261030_144000_Telegram" src="https://github.com/user-attachments/assets/9f312a1a-c43a-43b8-b332-f90c998217fd" /> | <img width="280" alt="Screenshot_20261030_144609_Telegram" src="https://github.com/user-attachments/assets/c8aaa72b-58c8-4166-8455-7f0b67c53c48" /> |
+
+</details>
+
+---
+
 ## Architecture
 
 ```mermaid

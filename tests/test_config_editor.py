@@ -93,6 +93,74 @@ def test_set_param(tmp_path: Path):
     assert docker_cfg.params["ignore_exited_0"] is True
 
 
+def test_disable_check(tmp_path: Path):
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")
+
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="docker-containers",
+        action="disable_check",
+    )
+
+    assert "-  enabled: true" in diff or "-    enabled: true" in diff
+    assert "+  enabled: false" in diff or "+    enabled: false" in diff
+    docker_cfg = next(c for c in configs if c.id == "docker-containers")
+    assert docker_cfg.enabled is False
+
+
+def test_enable_check(tmp_path: Path):
+    disabled_yaml = SAMPLE_CHECKS_YAML.replace("enabled: true", "enabled: false")
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(disabled_yaml, encoding="utf-8")
+
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="docker-containers",
+        action="enable_check",
+    )
+
+    assert "+  enabled: true" in diff or "+    enabled: true" in diff
+    docker_cfg = next(c for c in configs if c.id == "docker-containers")
+    assert docker_cfg.enabled is True
+
+
+def test_set_param_fallback_for_enabled(tmp_path: Path):
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")
+
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="docker-containers",
+        action="set_param",
+        key="enabled",
+        value="false",
+    )
+
+    docker_cfg = next(c for c in configs if c.id == "docker-containers")
+    assert docker_cfg.enabled is False
+    assert "enabled" not in docker_cfg.params
+
+
+def test_adaptive_yaml_indentation(tmp_path: Path):
+    # PyYAML style: sequence indent 2, offset 0 (no extra spaces before '- id:')
+    pyyaml_style = "checks:\n- id: node-health\n  type: node_metrics\n  enabled: true\n  interval_seconds: 60\n"
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(pyyaml_style, encoding="utf-8")
+
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="node-health",
+        action="disable_check",
+    )
+
+    # Verify only the enabled line was changed, not the sequence formatting
+    assert "-  enabled: true" in diff
+    assert "+  enabled: false" in diff
+    assert "- id: node-health" in new_yaml
+    assert "--- a/checks.yaml" in diff
+
+
 def test_validation_error_on_invalid_check(tmp_path: Path):
     yaml_file = tmp_path / "checks.yaml"
     yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")

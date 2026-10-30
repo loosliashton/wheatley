@@ -700,5 +700,70 @@ async def test_command_tools_include_summary_and_justification(test_env):
     assert prop.target == "pve-node-01/100"
 
 
+@pytest.mark.asyncio
+async def test_config_update_proposal_supersedes_earlier_draft_in_turn(test_env, tmp_path):
+    cfg, audit, usage, clients, check_engine = test_env
+
+    checks_file = tmp_path / "checks.yaml"
+    checks_file.write_text(
+        "checks:\n"
+        "- id: guests-up\n"
+        "  type: guest_state\n"
+        "  enabled: true\n"
+        "  interval_seconds: 60\n"
+        "  params:\n"
+        "    select:\n"
+        "      onboot: true\n"
+        "    exclude:\n"
+        "    - cave/103\n",
+        encoding="utf-8",
+    )
+    cfg.checks_file = str(checks_file)
+
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.is_configured = True
+    mock_provider.provider_name = "gemini"
+    mock_provider.model_name = "gemini-3.8-flash"
+
+    call_1 = ToolCall(
+        id="c1",
+        name="propose_check_config_update",
+        arguments={
+            "check_id": "guests-up",
+            "action": "add_exclude",
+            "values": ["110"],
+            "summary": "Exclude 110",
+        },
+    )
+    call_2 = ToolCall(
+        id="c2",
+        name="propose_check_config_update",
+        arguments={
+            "check_id": "guests-up",
+            "action": "add_exclude",
+            "values": ["cave/110"],
+            "summary": "Exclude cave/110",
+        },
+    )
+
+    mock_provider.generate_response = AsyncMock(
+        side_effect=[
+            LLMResponse(content=None, tool_calls=[call_1]),
+            LLMResponse(content=None, tool_calls=[call_2]),
+            LLMResponse(content="Created proposal for cave/110.", tool_calls=[]),
+        ]
+    )
+
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage, check_engine=check_engine)
+    res = await agent.chat("Remove 110 from monitoring", chat_id="supersede_test")
+
+    assert "Created proposal" in res
+    drained = agent.drain_pending_proposals()
+    assert len(drained) == 1
+    assert drained[0].summary == "Exclude cave/110"
+    assert "+    - cave/110" in drained[0].command
+
+
+
 
 

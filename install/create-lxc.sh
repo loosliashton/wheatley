@@ -209,6 +209,7 @@ if [[ "$START" == "true" ]]; then
     git config --system --add safe.directory /opt/wheatley || true
     su -s /bin/bash wheatley -c "python3 -m venv /opt/wheatley/venv && /opt/wheatley/venv/bin/pip install --upgrade pip && /opt/wheatley/venv/bin/pip install -e /opt/wheatley"
     ln -sf /opt/wheatley/venv/bin/wheatley /usr/local/bin/wheatley
+    ln -sf /opt/wheatley/venv/bin/wheatley /usr/bin/wheatley
 
     # Seed configuration templates if not already present
     if [[ ! -f /etc/wheatley/config.yaml && -f /opt/wheatley/config.example.yaml ]]; then

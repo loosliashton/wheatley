@@ -7,7 +7,7 @@ from contextvars import ContextVar
 import json
 import logging
 import re
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from wheatley.approvals import ApprovalStore
 from wheatley.audit import AuditLogger
@@ -217,15 +217,42 @@ class LLMAgent:
             value=value,
         )
 
+    @staticmethod
+    def _proposal_supersede_key(prop: Any) -> Optional[Tuple[str, str, str]]:
+        """Return a deduplication key for proposals that should supersede earlier drafts in the same turn."""
+        if getattr(prop, "proposal_type", None) == "CONFIG_UPDATE":
+            try:
+                data = json.loads(getattr(prop, "command", "") or "{}")
+                check_id = data.get("check_id")
+                if check_id:
+                    return ("CONFIG_UPDATE", str(getattr(prop, "target", "")), str(check_id))
+            except Exception:
+                pass
+        return None
+
+    def _replace_or_append_proposal(self, prop_list: List[Any], new_prop: Any) -> None:
+        key = self._proposal_supersede_key(new_prop)
+        if key is not None:
+            for idx, existing in enumerate(prop_list):
+                if self._proposal_supersede_key(existing) == key:
+                    if getattr(existing, "id", None) and getattr(existing, "id", None) != getattr(new_prop, "id", None):
+                        try:
+                            self.approvals.resolve_proposal(existing.id, "DENY", user_id=0)
+                        except Exception:
+                            pass
+                    prop_list[idx] = new_prop
+                    return
+        prop_list.append(new_prop)
+
     def _dispatch_proposal(self, prop: Any) -> None:
         turn_props = _turn_proposals_var.get()
         if turn_props is not None:
-            turn_props.append(prop)
-            self.pending_proposals.append(prop)
+            self._replace_or_append_proposal(turn_props, prop)
+            self._replace_or_append_proposal(self.pending_proposals, prop)
             return
 
         if self._defer_proposals:
-            self.pending_proposals.append(prop)
+            self._replace_or_append_proposal(self.pending_proposals, prop)
             return
 
         if self.proposal_sink:

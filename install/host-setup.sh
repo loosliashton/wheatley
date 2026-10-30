@@ -184,7 +184,9 @@ fi
 echo ""
 echo "================================================="
 echo " Setup complete for node: $NODE_NAME (NODE${NODE_INDEX})"
-echo " Add these entries to /etc/wheatley/secrets.env:"
+echo " Save these entries! You will paste them into"
+echo " /etc/wheatley/secrets.env inside the Wheatley"
+echo " container (CT 110) after running create-lxc.sh:"
 echo "================================================="
 if [[ -n "$SECRET_VALUE" ]]; then
   echo "NODE${NODE_INDEX}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=${SECRET_VALUE}\""
@@ -195,5 +197,5 @@ if [[ -n "$FINGERPRINT" ]]; then
   echo "NODE${NODE_INDEX}_TLS_FINGERPRINT=\"${FINGERPRINT}\""
 fi
 echo "================================================="
-echo " Host setup successfully configured."
+echo " Next step: Run ./install/create-lxc.sh to provision the Wheatley container."
 echo "================================================="

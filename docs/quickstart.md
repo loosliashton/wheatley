@@ -36,7 +36,7 @@ Run the host setup script on your primary Proxmox VE node:
 This script:
 - Creates a dedicated `wheatley@pve` user and `wheatley@pve!bot` API token with `PVEAuditor` read-only privileges on `/`.
 - Creates a restricted `wheatley` Linux user locked to `/usr/local/bin/wheatley-shell` with narrow sudoers rules.
-- Prints your `NODE1_TOKEN_MONITOR` and `NODE1_TLS_FINGERPRINT` entries for `/etc/wheatley/secrets.env`.
+- Prints your `NODE1_TOKEN_MONITOR` and `NODE1_TLS_FINGERPRINT` entries to save for `/etc/wheatley/secrets.env` (created inside the container in Step B).
 
 ### Step B: Provision the Dedicated LXC Container
 Create an unprivileged Debian container (default: `CT 110`) to run Wheatley:
@@ -48,7 +48,7 @@ Create an unprivileged Debian container (default: `CT 110`) to run Wheatley:
 *Customizable flags: `--ctid <id>`, `--hostname <name>`, `--storage <pool>`, `--bridge <bridge>`, `--memory <mb>`.*
 
 `create-lxc.sh` automatically:
-- Installs `/opt/wheatley`, builds `/opt/wheatley/venv`, and links `/usr/local/bin/wheatley`.
+- Installs `/opt/wheatley`, builds `/opt/wheatley/venv`, and symlinks `/usr/bin/wheatley` and `/usr/local/bin/wheatley`.
 - Seeds `/etc/wheatley/config.yaml`, `/etc/wheatley/checks.yaml`, and `/etc/wheatley/secrets.env`.
 - Installs and enables `/etc/systemd/system/wheatley.service`.
 - Generates `/var/lib/wheatley/.ssh/id_ed25519` inside the container, authorizes it on the local Proxmox host, and prints the `--ssh-key` command to run on any secondary cluster nodes.

@@ -132,8 +132,8 @@ Available both inside the LXC container and from the Proxmox host via the conven
 # Auto-discover homelab services & guests across all Proxmox nodes
 wheatley discover
 
-# Export recommended draft configuration
-wheatley discover --output /etc/wheatley/config.draft.yaml
+# Export recommended checks configuration
+wheatley discover --output /etc/wheatley/checks.yaml
 
 # Validate configuration and secrets
 wheatley config validate

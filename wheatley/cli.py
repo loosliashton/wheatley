@@ -295,6 +295,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
             with open(out_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(checks_payload, f, sort_keys=False, default_flow_style=False)
             print(f"✅ Recommended checks configuration written to: {out_path}")
+            print("💡 If wheatley.service is running, restart it to load new checks: systemctl restart wheatley")
             detected_self = draft.get("self_guest")
             if detected_self and detected_self != cfg.self_guest:
                 print(f"💡 Detected Wheatley guest at '{detected_self}' — set 'self_guest: \"{detected_self}\"' in config.yaml.")

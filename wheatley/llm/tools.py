@@ -142,8 +142,8 @@ def build_tool_definitions() -> List[ToolDefinition]:
         ToolDefinition(
             name="propose_check_config_update",
             description=(
-                "Propose an update to the checks configuration file (checks.yaml) to add/remove container exclusions, "
-                "adjust check thresholds, or modify check parameters. "
+                "Propose an update to the checks configuration file (checks.yaml) to enable/disable checks, "
+                "add/remove container exclusions, adjust thresholds, or modify check parameters. "
                 "This creates an interactive proposal card for the user to review and approve with a diff before anything is changed."
             ),
             parameters={
@@ -152,14 +152,14 @@ def build_tool_definitions() -> List[ToolDefinition]:
                     "check_id": {"type": "string", "description": "The ID of the check to update (e.g. 'docker-containers')"},
                     "action": {
                         "type": "string",
-                        "enum": ["add_exclude", "remove_exclude", "set_param"],
-                        "description": "The type of configuration modification",
+                        "enum": ["disable_check", "enable_check", "add_exclude", "remove_exclude", "set_param"],
+                        "description": "The type of configuration modification: 'disable_check' (to stop running a check), 'enable_check', 'add_exclude', 'remove_exclude', or 'set_param'",
                     },
                     "key": {"type": "string", "description": "Parameter key to update (e.g. 'exclude' or parameter name)"},
                     "values": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of string values (e.g. container names to exclude)",
+                        "description": "List of string values (e.g. 'node/vmid' like 'cave/110' for guest_state exclusions, or container names for docker exclusions)",
                     },
                     "value": {"type": "string", "description": "Scalar value if setting a single parameter"},
                     "summary": {"type": "string", "description": "Clear explanation of the proposed change"},
@@ -322,6 +322,8 @@ class AgentToolbox:
         states = self.check_engine.get_check_states()
         summary = []
         for s in states:
+            chk = self.check_engine.checks.get(s["id"]) if hasattr(self.check_engine, "checks") and isinstance(self.check_engine.checks, dict) else None
+            params = s.get("params") if "params" in s else (getattr(chk, "params", {}) if chk else {})
             summary.append({
                 "id": s["id"],
                 "type": s["type"],
@@ -329,6 +331,7 @@ class AgentToolbox:
                 "is_muted": s["is_muted"],
                 "consecutive_failures": s["consecutive_failures"],
                 "summary": s["last_result"].summary if s.get("last_result") else None,
+                "params": params,
             })
         return {"checks": summary}
 

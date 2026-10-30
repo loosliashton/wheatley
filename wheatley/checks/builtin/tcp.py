@@ -23,7 +23,7 @@ class TcpCheck(BaseCheck):
                 summary="Missing required 'host' or 'port' parameter",
             )
 
-        resolved_host = context.resolve_string(raw_host)
+        resolved_host = await context.resolve_string_async(raw_host)
         if "{guest:" in resolved_host:
             return CheckResult(
                 check_id=self.id,
@@ -47,6 +47,7 @@ class TcpCheck(BaseCheck):
                 details={"host": resolved_host, "port": port},
             )
         except Exception as e:
+            context.invalidate_string_ips(raw_host)
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.CRIT,

@@ -19,6 +19,7 @@ import sqlite3
 from typing import List, Optional, Tuple
 import uuid
 
+from wheatley.db import SQLiteDatabase
 from wheatley.tools.allowlist import validate_proposed_pattern
 
 logger = logging.getLogger("wheatley.approvals")
@@ -27,7 +28,7 @@ logger = logging.getLogger("wheatley.approvals")
 @dataclass
 class Proposal:
     id: str
-    proposal_type: str  # "ACTION" or "ALLOWLIST_RULE"
+    proposal_type: str  # "ACTION", "ALLOWLIST_RULE", "CONFIG_UPDATE", "SELF_UPDATE"
     target: str
     command: str
     summary: str
@@ -63,15 +64,13 @@ class UserAllowlistRule:
 class ApprovalStore:
     """SQLite-backed store for interactive proposals and dynamic allowlist rules."""
 
-    def __init__(self, db_path: str = "/var/lib/wheatley/wheatley.db"):
-        self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | Path | SQLiteDatabase = "/var/lib/wheatley/wheatley.db"):
+        self.db = SQLiteDatabase(db_path)
+        self.db_path = str(self.db.db_path)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self.db.connect()
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:
@@ -95,21 +94,11 @@ class ApprovalStore:
                 )
                 """
             )
-            # Add missing columns if proposals table pre-existed
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(proposals)")
-            cols = {row["name"] for row in cur.fetchall()}
-            if "hash" not in cols:
-                conn.execute("ALTER TABLE proposals ADD COLUMN hash TEXT")
-            if "proposal_type" not in cols:
-                conn.execute("ALTER TABLE proposals ADD COLUMN proposal_type TEXT NOT NULL DEFAULT 'ACTION'")
-            if "pattern" not in cols:
-                conn.execute("ALTER TABLE proposals ADD COLUMN pattern TEXT")
-            if "summary" not in cols:
-                conn.execute("ALTER TABLE proposals ADD COLUMN summary TEXT DEFAULT ''")
-            if "justification" not in cols:
-                conn.execute("ALTER TABLE proposals ADD COLUMN justification TEXT")
-
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_allowlist (
@@ -201,13 +190,13 @@ class ApprovalStore:
 
             return Proposal(
                 id=row["id"],
-                hash=row["hash"] if "hash" in row.keys() else None,
+                hash=row["hash"],
                 proposal_type=row["proposal_type"],
                 target=row["target"],
                 command=row["command"],
                 pattern=row["pattern"],
                 summary=row["summary"],
-                justification=row["justification"] if "justification" in row.keys() else None,
+                justification=row["justification"],
                 risk=row["risk"],
                 status=status,
                 created_at=datetime.fromisoformat(row["created_at"]),
@@ -230,13 +219,13 @@ class ApprovalStore:
                 props.append(
                     Proposal(
                         id=row["id"],
-                        hash=row["hash"] if "hash" in row.keys() else None,
+                        hash=row["hash"],
                         proposal_type=row["proposal_type"],
                         target=row["target"],
                         command=row["command"],
                         pattern=row["pattern"],
                         summary=row["summary"],
-                        justification=row["justification"] if "justification" in row.keys() else None,
+                        justification=row["justification"],
                         risk=row["risk"],
                         status=row["status"],
                         created_at=datetime.fromisoformat(row["created_at"]),

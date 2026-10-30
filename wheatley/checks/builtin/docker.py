@@ -26,7 +26,7 @@ class DockerCheck(BaseCheck):
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.UNKNOWN,
-                summary="Missing required 'guest' parameter (e.g. 'cave/100')",
+                summary="Missing required 'guest' parameter (e.g. 'pve-node-01/100')",
             )
 
         target_containers = self.params.get("containers", "*")

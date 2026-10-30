@@ -13,7 +13,7 @@ def store(tmp_path):
 def test_create_and_get_proposal(store):
     prop = store.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave/101",
+        target="pve-node-01/101",
         command="snapraid status",
         summary="Check snapraid parity state",
         justification="Verify whether parity sync completed without sync errors",
@@ -34,7 +34,7 @@ def test_create_and_get_proposal(store):
     assert fetched.id == prop.id
     assert fetched.hash == prop.hash
     assert fetched.command == "snapraid status"
-    assert fetched.target == "cave/101"
+    assert fetched.target == "pve-node-01/101"
     assert fetched.pattern == "snapraid status *"
     assert fetched.summary == "Check snapraid parity state"
     assert fetched.justification == "Verify whether parity sync completed without sync errors"
@@ -44,9 +44,9 @@ def test_proposal_expiration(store):
     # Create proposal with negative expiration (already expired)
     prop = store.create_proposal(
         proposal_type="ACTION",
-        target="cave",
-        command="systemctl restart frigate",
-        summary="Restart frigate",
+        target="pve-node-01",
+        command="systemctl restart nginx",
+        summary="Restart nginx",
         expires_minutes=-5,
     )
     # When fetched, it should be auto-marked EXPIRED
@@ -64,9 +64,9 @@ def test_proposal_expiration(store):
 def test_single_use_resolution(store):
     prop = store.create_proposal(
         proposal_type="ACTION",
-        target="cave",
-        command="systemctl restart frigate",
-        summary="Restart frigate",
+        target="pve-node-01",
+        command="systemctl restart nginx",
+        summary="Restart nginx",
     )
     ok, msg = store.resolve_proposal(prop.id, "APPROVE", user_id=123)
     assert ok is True
@@ -83,7 +83,7 @@ def test_single_use_resolution(store):
 def test_allow_once_workflow(store):
     prop = store.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave",
+        target="pve-node-01",
         command="smartctl -a /dev/sda",
         summary="Check disk smart status",
         pattern="smartctl -a *",
@@ -93,7 +93,7 @@ def test_allow_once_workflow(store):
     assert "one-time" in msg.lower()
 
     # Verify no persistent rule was created in user_allowlist
-    active = store.get_active_allowlist("cave")
+    active = store.get_active_allowlist("pve-node-01")
     assert len(active) == 0
 
     # Record execution
@@ -106,28 +106,28 @@ def test_allow_once_workflow(store):
 def test_allow_always_target_scoping(store):
     prop = store.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave/101",
+        target="pve-node-01/101",
         command="snapraid status",
-        summary="Allow snapraid status on cave/101",
+        summary="Allow snapraid status on pve-node-01/101",
         pattern="snapraid status *",
     )
     ok, msg = store.resolve_proposal(prop.id, "ALLOW_ALWAYS", user_id=123)
     assert ok is True
 
-    # Verify rule is present for target cave/101
-    active_101 = store.get_active_allowlist("cave/101")
+    # Verify rule is present for target pve-node-01/101
+    active_101 = store.get_active_allowlist("pve-node-01/101")
     assert "snapraid status *" in active_101
 
     # Verify rule is NOT active for other targets
-    assert "snapraid status *" not in store.get_active_allowlist("cave/102")
-    assert "snapraid status *" not in store.get_active_allowlist("cave")
-    assert "snapraid status *" not in store.get_active_allowlist("doug")
+    assert "snapraid status *" not in store.get_active_allowlist("pve-node-01/102")
+    assert "snapraid status *" not in store.get_active_allowlist("pve-node-01")
+    assert "snapraid status *" not in store.get_active_allowlist("pve-node-02")
 
 
 def test_list_and_revoke_rules(store):
     prop1 = store.create_proposal(
         proposal_type="ALLOWLIST_RULE",
-        target="cave",
+        target="pve-node-01",
         command="smartctl -a /dev/sda",
         summary="smartctl rule",
         pattern="smartctl -a *",
@@ -137,22 +137,22 @@ def test_list_and_revoke_rules(store):
     rules = store.list_user_rules()
     assert len(rules) == 1
     rule_id = rules[0].id
-    assert rules[0].target == "cave"
+    assert rules[0].target == "pve-node-01"
     assert rules[0].pattern == "smartctl -a *"
     assert rules[0].created_by == 456
 
     # Revoke rule
     assert store.revoke_user_rule(rule_id) is True
     assert len(store.list_user_rules()) == 0
-    assert "smartctl -a *" not in store.get_active_allowlist("cave")
+    assert "smartctl -a *" not in store.get_active_allowlist("pve-node-01")
 
     # Revoke non-existent rule
     assert store.revoke_user_rule(9999) is False
 
 
 def test_get_active_proposals(store):
-    p1 = store.create_proposal("ALLOWLIST_RULE", "cave", "smartctl --scan", "Scan disks", expires_minutes=15)
-    store.create_proposal("ALLOWLIST_RULE", "cave", "pvesm status", "Storage status", expires_minutes=-5)
+    p1 = store.create_proposal("ALLOWLIST_RULE", "pve-node-01", "smartctl --scan", "Scan disks", expires_minutes=15)
+    store.create_proposal("ALLOWLIST_RULE", "pve-node-01", "pvesm status", "Storage status", expires_minutes=-5)
 
     active = store.get_active_proposals()
     assert len(active) == 1

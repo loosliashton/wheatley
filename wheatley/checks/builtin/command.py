@@ -45,7 +45,7 @@ class CommandCheck(BaseCheck):
 
         guest_spec = self.params.get("guest")
         node = self.params.get("node")
-        expected_code = int(self.params.get("expected_exit_code", 0))
+        expected_code = int(self.params.get("expected_exit_code", self.params.get("expect_exit_code", 0)))
         output_regex = self.params.get("output_regex")
         fail_on_regex = self.params.get("fail_on_regex")
         timeout = int(self.params.get("timeout_seconds", 15))

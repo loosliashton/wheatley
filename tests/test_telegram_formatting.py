@@ -83,13 +83,13 @@ def test_tables_converted_to_pre():
     md = """Summary table:
 | Node | Status | RAM |
 | --- | --- | --- |
-| cave | OK | 16GB |
-| doug | OK | 8GB |
+| pve-node-01 | OK | 16GB |
+| pve-node-02 | OK | 8GB |
 """
     html = markdown_to_telegram_html(md)
     assert "<pre>" in html
-    assert "cave" in html
-    assert "doug" in html
+    assert "pve-node-01" in html
+    assert "pve-node-02" in html
 
 
 def test_strip_html_tags():

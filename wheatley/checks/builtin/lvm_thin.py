@@ -5,6 +5,7 @@ Monitors data and metadata utilization for LVM Thin storage pools on Proxmox VE 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List
 from wheatley.checks.base import BaseCheck, CheckContext, CheckResult, CheckStatus, register_check
@@ -72,7 +73,7 @@ class LvmThinCheck(BaseCheck):
                 client = context.get_client(node_name)
                 if client:
                     try:
-                        storage_list = client.get_storage()
+                        storage_list = await asyncio.to_thread(client.get_storage)
                         for s in storage_list:
                             st_type = str(s.get("type", "")).lower()
                             s_name = s.get("storage", "")

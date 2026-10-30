@@ -2,7 +2,7 @@
 # ==============================================================================
 # Wheatley Homelab Agent - Proxmox Host Setup Script
 # ==============================================================================
-# Run this script directly on any Proxmox VE node (e.g. cave, doug) to configure:
+# Run this script directly on any Proxmox VE node (e.g. pve-node-01, pve-node-02) to configure:
 #   1. Dedicated API user (wheatley@pve) + PVEAuditor role
 #   2. Monitoring API token
 #   3. Restricted Linux system user (wheatley) with wheatley-shell
@@ -25,6 +25,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOKEN_NAME="bot"
 SSH_KEY=""
+NODE_INDEX="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,8 +37,12 @@ while [[ $# -gt 0 ]]; do
       SSH_KEY="$2"
       shift 2
       ;;
+    --node-index|-n)
+      NODE_INDEX="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 [--token-name bot] [--ssh-key \"ssh-ed25519 ...\"]"
+      echo "Usage: $0 [--token-name bot] [--node-index 1] [--ssh-key \"ssh-ed25519 ...\"]"
       exit 0
       ;;
     *)
@@ -113,6 +118,11 @@ else
   echo "Updated user 'wheatley' shell to '$RESTRICTED_SHELL'."
 fi
 
+# Auto-detect SSH public key from local CT 110 if not explicitly passed
+if [[ -z "$SSH_KEY" ]] && command -v pct >/dev/null 2>&1 && pct status 110 >/dev/null 2>&1; then
+  SSH_KEY=$(pct exec 110 -- cat /var/lib/wheatley/.ssh/id_ed25519.pub 2>/dev/null || true)
+fi
+
 # Set up SSH authorized keys if provided
 if [[ -n "$SSH_KEY" ]]; then
   mkdir -p /home/wheatley/.ssh
@@ -132,14 +142,29 @@ cat <<'EOF' > "$SUDOERS_FILE"
 # Wheatley Homelab Agent - Narrow Sudoers Permissions
 wheatley ALL=(ALL) NOPASSWD: \
     /usr/sbin/pct exec *, \
+    /usr/sbin/pct start *, \
+    /usr/sbin/pct stop *, \
+    /usr/sbin/pct restart *, \
+    /usr/sbin/pct reboot *, \
+    /usr/sbin/pct shutdown *, \
     /usr/sbin/qm guest exec *, \
+    /usr/sbin/qm start *, \
+    /usr/sbin/qm stop *, \
+    /usr/sbin/qm reboot *, \
+    /usr/sbin/qm shutdown *, \
+    /usr/sbin/qm reset *, \
     /usr/sbin/pvesm status*, \
+    /usr/sbin/pvesm list*, \
     /usr/sbin/zpool status*, \
     /usr/sbin/zpool list*, \
     /usr/sbin/smartctl *, \
     /usr/bin/sensors *, \
     /bin/systemctl status *, \
     /usr/bin/systemctl status *, \
+    /bin/systemctl is-active *, \
+    /usr/bin/systemctl is-active *, \
+    /bin/systemctl is-failed *, \
+    /usr/bin/systemctl is-failed *, \
     /bin/journalctl *, \
     /usr/bin/journalctl *, \
     /bin/df *, \
@@ -158,18 +183,19 @@ fi
 
 echo ""
 echo "================================================="
-echo " Setup complete for node: $NODE_NAME"
-echo " Add these entries to /etc/wheatley/secrets.env:"
+echo " Setup complete for node: $NODE_NAME (NODE${NODE_INDEX})"
+echo " Save these entries! You will paste them into"
+echo " /etc/wheatley/secrets.env inside the Wheatley"
+echo " container (CT 110) after running create-lxc.sh:"
 echo "================================================="
 if [[ -n "$SECRET_VALUE" ]]; then
-  echo "${NODE_NAME^^}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=${SECRET_VALUE}\""
-  echo "${NODE_NAME^^}_TOKEN_OPS=\"wheatley@pve!${TOKEN_NAME}=${SECRET_VALUE}\""
+  echo "NODE${NODE_INDEX}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=${SECRET_VALUE}\""
 else
-  echo "# Set ${NODE_NAME^^}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=<SECRET>\" with your token secret"
+  echo "# Set NODE${NODE_INDEX}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=<SECRET>\" with your token secret"
 fi
 if [[ -n "$FINGERPRINT" ]]; then
-  echo "${NODE_NAME^^}_TLS_FINGERPRINT=\"${FINGERPRINT}\""
+  echo "NODE${NODE_INDEX}_TLS_FINGERPRINT=\"${FINGERPRINT}\""
 fi
 echo "================================================="
-echo " Host setup successfully configured."
+echo " Next step: Run ./install/create-lxc.sh to provision the Wheatley container."
 echo "================================================="

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from datetime import datetime, timezone
 from enum import Enum
 import logging
 import re
+import time
 from typing import Any, Callable, Dict, Optional, Type
 from pydantic import BaseModel, Field
 
@@ -15,6 +17,8 @@ from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.checks.base")
+
+_GUEST_TOKEN_RE = re.compile(r"\{guest:([a-zA-Z0-9_\-]+/[0-9]+)\}")
 
 
 class CheckStatus(str, Enum):
@@ -45,23 +49,45 @@ class CheckContext:
         config: WheatleyConfig,
         proxmox_clients: Dict[str, ProxmoxClient],
         shell: Optional[ShellExecutor] = None,
+        ip_cache_ttl: float = 300.0,
     ):
         self.config = config
         self.clients = proxmox_clients
         self.shell = shell
+        self.ip_cache_ttl = ip_cache_ttl
         self._ip_cache: Dict[str, str] = {}
+        self._ip_cache_timestamps: Dict[str, float] = {}
 
     def get_client(self, node_name: str) -> Optional[ProxmoxClient]:
         return self.clients.get(node_name)
 
-    def resolve_guest_ip(self, guest_spec: str) -> Optional[str]:
-        """Resolves guest specification e.g. 'cave/102' to a live IPv4 address."""
+    def _normalize_guest_spec(self, guest_spec: str) -> str:
         spec = guest_spec.strip()
         if spec.startswith("{guest:") and spec.endswith("}"):
             spec = spec[7:-1].strip()
+        return spec
+
+    def invalidate_guest_ip(self, guest_spec: str) -> None:
+        """Invalidate cached IP for a guest specification (e.g. after connection failure)."""
+        spec = self._normalize_guest_spec(guest_spec)
+        self._ip_cache.pop(spec, None)
+        self._ip_cache_timestamps.pop(spec, None)
+
+    def invalidate_string_ips(self, text: str) -> None:
+        """Invalidate any cached guest IPs referenced in `{guest:node/vmid}` tokens in text."""
+        for match in _GUEST_TOKEN_RE.finditer(text):
+            self.invalidate_guest_ip(match.group(1))
+
+    def resolve_guest_ip(self, guest_spec: str) -> Optional[str]:
+        """Resolves guest specification e.g. 'pve-node-01/102' to a live IPv4 address with TTL caching."""
+        spec = self._normalize_guest_spec(guest_spec)
+        now = time.monotonic()
 
         if spec in self._ip_cache:
-            return self._ip_cache[spec]
+            cached_at = self._ip_cache_timestamps.get(spec, 0.0)
+            if (now - cached_at) < self.ip_cache_ttl:
+                return self._ip_cache[spec]
+            self.invalidate_guest_ip(spec)
 
         if "/" not in spec:
             return None
@@ -72,7 +98,6 @@ class CheckContext:
 
         try:
             vmid = int(vmid_str)
-            # Find whether guest is qemu or lxc
             guests = client.get_guests()
             guest_type = "qemu"
             for g in guests:
@@ -84,16 +109,25 @@ class CheckContext:
             if ips:
                 resolved = ips[0]
                 self._ip_cache[spec] = resolved
+                self._ip_cache_timestamps[spec] = now
                 return resolved
         except Exception as e:
             logger.warning("Failed to resolve IP for guest %s: %s", spec, e)
 
         return None
 
+    async def resolve_guest_ip_async(self, guest_spec: str) -> Optional[str]:
+        """Async wrapper around resolve_guest_ip that offloads uncached Proxmox API calls to a worker thread."""
+        spec = self._normalize_guest_spec(guest_spec)
+        now = time.monotonic()
+        if spec in self._ip_cache:
+            cached_at = self._ip_cache_timestamps.get(spec, 0.0)
+            if (now - cached_at) < self.ip_cache_ttl:
+                return self._ip_cache[spec]
+        return await asyncio.to_thread(self.resolve_guest_ip, spec)
+
     def resolve_string(self, text: str) -> str:
         """Replaces all occurrences of {guest:node/vmid} with resolved IP addresses."""
-        pattern = re.compile(r"\{guest:([a-zA-Z0-9_\-]+/[0-9]+)\}")
-
         def replace_match(m: re.Match) -> str:
             spec = m.group(1)
             ip = self.resolve_guest_ip(spec)
@@ -102,7 +136,13 @@ class CheckContext:
             logger.warning("Could not resolve IP for %s in string '%s'", spec, text)
             return m.group(0)
 
-        return pattern.sub(replace_match, text)
+        return _GUEST_TOKEN_RE.sub(replace_match, text)
+
+    async def resolve_string_async(self, text: str) -> str:
+        """Asynchronously replaces all occurrences of {guest:node/vmid} without blocking the event loop."""
+        if "{guest:" not in text:
+            return text
+        return await asyncio.to_thread(self.resolve_string, text)
 
 
 class BaseCheck(ABC):

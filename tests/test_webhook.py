@@ -45,7 +45,7 @@ async def test_webhook_pve_flow(tmp_path):
             "severity": "error",
             "data": {
                 "type": "vzdump",
-                "hostname": "cave",
+                "hostname": "pve-node-01",
                 "id": "100",
             },
         }
@@ -54,7 +54,7 @@ async def test_webhook_pve_flow(tmp_path):
         assert resp.status == 200
         assert len(alerts) == 1
         assert "PROXMOX BACKUP FAILED" in alerts[0][0]
-        assert "cave" in alerts[0][0]
+        assert "pve-node-01" in alerts[0][0]
         assert "100" in alerts[0][0]
 
         # 4. Authorized generic PVE failure (fencing / replication)
@@ -62,7 +62,7 @@ async def test_webhook_pve_flow(tmp_path):
             "title": "node fencing event",
             "message": "Node 2 fencing triggered",
             "severity": "error",
-            "data": {"type": "fencing", "hostname": "cave"},
+            "data": {"type": "fencing", "hostname": "pve-node-01"},
         }
         resp = await client.post("/webhook/pve", json=fencing_payload, headers=headers)
         assert resp.status == 200
@@ -74,7 +74,7 @@ async def test_webhook_pve_flow(tmp_path):
             "title": "vzdump backup succeeded",
             "message": "INFO: Backup of VM 100 finished successfully",
             "severity": "info",
-            "data": {"type": "vzdump", "hostname": "cave"},
+            "data": {"type": "vzdump", "hostname": "pve-node-01"},
         }
         resp = await client.post("/webhook/pve", json=info_payload, headers=headers)
         assert resp.status == 200

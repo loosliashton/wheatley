@@ -4,13 +4,48 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+from requests.adapters import HTTPAdapter
 import urllib3
+from urllib3.poolmanager import PoolManager
 from proxmoxer import ProxmoxAPI
 
 from wheatley.config import NodeConfig
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger("wheatley.tools.proxmox")
+
+
+class _FingerprintAdapter(HTTPAdapter):
+    """Requests HTTPAdapter that enforces SHA-256 TLS certificate fingerprint pinning."""
+
+    def __init__(self, fingerprint: str, **kwargs: Any):
+        self.fingerprint = fingerprint
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        pool_kwargs["assert_fingerprint"] = self.fingerprint
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+
+def _is_valid_fingerprint(fp: Optional[str]) -> bool:
+    if not fp:
+        return False
+    cleaned = fp.strip().replace(":", "").upper()
+    if len(cleaned) != 64:
+        return False
+    # Ignore dummy/example placeholders
+    if cleaned.startswith("XXXX") or cleaned.startswith("00112233"):
+        return False
+    try:
+        int(cleaned, 16)
+        return True
+    except ValueError:
+        return False
 
 
 class ProxmoxClient:
@@ -49,6 +84,15 @@ class ProxmoxClient:
                 verify_ssl=False,
                 timeout=10,
             )
+
+            fp = self.node_config.tls_fingerprint
+            if _is_valid_fingerprint(fp):
+                try:
+                    session = getattr(self._api, "_store", {}).get("session")
+                    if session is not None:
+                        session.mount("https://", _FingerprintAdapter(fp.strip()))
+                except Exception as e:
+                    logger.warning("Failed to attach TLS fingerprint adapter for node %s: %s", self.name, e)
         return self._api
 
     def get_node_status(self) -> Dict[str, Any]:

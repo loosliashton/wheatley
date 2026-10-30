@@ -42,19 +42,19 @@ checks:
       exclude: []
 
   # Service Health Checks
-  - id: plex
+  - id: web-app
     type: http
     enabled: true
     interval_seconds: 60
     params:
-      url: "http://{guest:node1/102}:32400/identity"
+      url: "http://{guest:pve-node-01/102}:8080/health"
 
-  - id: frigate
+  - id: media-server
     type: http
     enabled: true
     interval_seconds: 60
     params:
-      url: "http://{guest:node1/107}:5000/api/version"
+      url: "http://{guest:pve-node-01/103}:32400/identity"
 
   # Docker Container Monitoring
   - id: docker-containers
@@ -62,7 +62,7 @@ checks:
     enabled: true
     interval_seconds: 60
     params:
-      guest: "node1/100"
+      guest: "pve-node-01/100"
       containers: "*"
       exclude: []        # Add container names to ignore here
       ignore_exited_0: true  # Silences cleanly stopped/dormant containers

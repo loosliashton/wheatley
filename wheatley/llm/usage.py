@@ -8,6 +8,7 @@ import sqlite3
 from typing import Optional, Tuple
 
 from wheatley.audit import AuditLogger
+from wheatley.db import SQLiteDatabase
 
 logger = logging.getLogger("wheatley.llm.usage")
 
@@ -15,13 +16,35 @@ logger = logging.getLogger("wheatley.llm.usage")
 class UsageTracker:
     """Tracks token consumption and request telemetry without imposing artificial billing caps or warnings."""
 
-    def __init__(self, audit: AuditLogger):
+    def __init__(self, audit: AuditLogger, db: Optional[SQLiteDatabase] = None):
         self.audit = audit
+        self.db = db or audit.db
+        self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.audit.db_path))
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self.db.connect()
+
+    def _init_db(self) -> None:
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    context TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_llm_usage_time ON llm_usage(timestamp);
+                """
+            )
+            conn.commit()
 
     def record_usage(
         self,
@@ -37,10 +60,10 @@ class UsageTracker:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO budget_usage (timestamp, model, input_tokens, output_tokens, cost_usd, context)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO llm_usage (timestamp, model, input_tokens, output_tokens, context)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (now_iso, model, input_tokens, output_tokens, 0.0, context),
+                (now_iso, model, input_tokens, output_tokens, context),
             )
             conn.commit()
 
@@ -68,7 +91,7 @@ class UsageTracker:
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(input_tokens), 0) as inp, COALESCE(SUM(output_tokens), 0) as outp
-                FROM budget_usage
+                FROM llm_usage
                 WHERE timestamp LIKE ?
                 """,
                 (f"{date_str}%",),
@@ -86,7 +109,7 @@ class UsageTracker:
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(input_tokens), 0) as inp, COALESCE(SUM(output_tokens), 0) as outp
-                FROM budget_usage
+                FROM llm_usage
                 WHERE timestamp LIKE ?
                 """,
                 (f"{month_str}%",),
@@ -100,11 +123,11 @@ class UsageTracker:
             cursor = conn.cursor()
             if month_str:
                 cursor.execute(
-                    "SELECT COUNT(*) as cnt FROM budget_usage WHERE timestamp LIKE ?",
+                    "SELECT COUNT(*) as cnt FROM llm_usage WHERE timestamp LIKE ?",
                     (f"{month_str}%",),
                 )
             else:
-                cursor.execute("SELECT COUNT(*) as cnt FROM budget_usage")
+                cursor.execute("SELECT COUNT(*) as cnt FROM llm_usage")
             row = cursor.fetchone()
             return int(row["cnt"]) if row else 0
 

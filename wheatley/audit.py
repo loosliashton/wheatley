@@ -1,26 +1,26 @@
-"""Wheatley Audit & Storage Engine (SQLite)"""
+"""Wheatley Audit Storage Engine (SQLite)"""
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Dict, List, Optional
+
+from wheatley.db import SQLiteDatabase
 
 
 class AuditLogger:
-    """Manages SQLite audit log, proposals, budget usage, and ledger."""
+    """Manages SQLite audit log."""
 
-    def __init__(self, db_path: str | Path = "/var/lib/wheatley/wheatley.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | Path | SQLiteDatabase = "/var/lib/wheatley/wheatley.db"):
+        self.db = SQLiteDatabase(db_path)
+        self.db_path = self.db.db_path
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self.db.connect()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -35,64 +35,13 @@ class AuditLogger:
                     target TEXT,
                     action TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    details TEXT,
-                    cost_usd REAL DEFAULT 0.0
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS proposals (
-                    id TEXT PRIMARY KEY,
-                    proposal_type TEXT NOT NULL DEFAULT 'ACTION',
-                    hash TEXT,
-                    created_at REAL NOT NULL,
-                    expires_at REAL NOT NULL,
-                    target TEXT NOT NULL,
-                    command TEXT NOT NULL,
-                    pattern TEXT,
-                    reason TEXT,
-                    summary TEXT,
-                    risk TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    executed_at REAL,
-                    execution_result TEXT
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS budget_usage (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    input_tokens INTEGER NOT NULL,
-                    output_tokens INTEGER NOT NULL,
-                    cost_usd REAL NOT NULL,
-                    context TEXT
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS credit_ledger (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    grant_month TEXT NOT NULL UNIQUE,
-                    grant_usd REAL NOT NULL,
-                    remaining_usd REAL NOT NULL,
-                    created_at REAL NOT NULL,
-                    expires_at REAL NOT NULL
+                    details TEXT
                 )
                 """
             )
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(timestamp);
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
                 """
             )
             conn.commit()
@@ -105,7 +54,6 @@ class AuditLogger:
         status: str = "INFO",
         target: Optional[str] = None,
         details: Optional[Dict[str, Any] | str] = None,
-        cost_usd: float = 0.0,
     ) -> int:
         now_iso = datetime.now(timezone.utc).isoformat()
         details_str = json.dumps(details, default=str) if isinstance(details, (dict, list)) else (details or "")
@@ -113,10 +61,10 @@ class AuditLogger:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO audit_log (timestamp, event_type, source, target, action, status, details, cost_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO audit_log (timestamp, event_type, source, target, action, status, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (now_iso, event_type, source, target, action, status, details_str, cost_usd),
+                (now_iso, event_type, source, target, action, status, details_str),
             )
             conn.commit()
             return cursor.lastrowid
@@ -126,7 +74,7 @@ class AuditLogger:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, timestamp, event_type, source, target, action, status, details, cost_usd
+                SELECT id, timestamp, event_type, source, target, action, status, details
                 FROM audit_log
                 ORDER BY id DESC
                 LIMIT ?

@@ -24,8 +24,10 @@ class ZfsCheck(BaseCheck):
                 summary="ShellExecutor is not configured in CheckContext",
             )
 
-        nodes_param = self.params.get("nodes", "*")
-        pool = self.params.get("pool")
+        nodes_param = self.params.get("nodes") or self.params.get("node") or "*"
+        pool = self.params.get("pool") or self.params.get("pools")
+        if pool == "*" or isinstance(pool, list):
+            pool = " ".join(str(p) for p in pool) if isinstance(pool, list) else None
 
         if nodes_param == "*":
             target_nodes = [n.name for n in context.config.nodes]

@@ -21,7 +21,7 @@ class HttpCheck(BaseCheck):
                 summary="Missing required 'url' parameter",
             )
 
-        resolved_url = context.resolve_string(raw_url)
+        resolved_url = await context.resolve_string_async(raw_url)
         if "{guest:" in resolved_url:
             return CheckResult(
                 check_id=self.id,
@@ -36,7 +36,7 @@ class HttpCheck(BaseCheck):
 
         timeout = float(self.params.get("timeout_seconds", 5.0))
         tls_verify = bool(self.params.get("tls_verify", True))
-        match_body = self.params.get("match_body")
+        match_body = self.params.get("match_body") or self.params.get("body_contains")
         method = self.params.get("method", "GET").upper()
 
         start_time = time.perf_counter()
@@ -72,6 +72,7 @@ class HttpCheck(BaseCheck):
                 )
 
         except httpx.ConnectTimeout:
+            context.invalidate_string_ips(raw_url)
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.CRIT,
@@ -79,6 +80,7 @@ class HttpCheck(BaseCheck):
                 details={"url": resolved_url},
             )
         except httpx.ConnectError as e:
+            context.invalidate_string_ips(raw_url)
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.CRIT,

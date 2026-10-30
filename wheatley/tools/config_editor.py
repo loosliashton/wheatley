@@ -19,10 +19,13 @@ from wheatley.config import CheckConfig
 logger = logging.getLogger("wheatley.tools.config_editor")
 
 
-def get_yaml_parser() -> YAML:
+def get_yaml_parser(text: Optional[str] = None) -> YAML:
     y = YAML(typ="rt")
     y.preserve_quotes = True
-    y.indent(mapping=2, sequence=4, offset=2)
+    if text and ("\n  - " in text or "\n  -" in text):
+        y.indent(mapping=2, sequence=4, offset=2)
+    else:
+        y.indent(mapping=2, sequence=2, offset=0)
     return y
 
 
@@ -43,7 +46,7 @@ def modify_check_config(
         raise FileNotFoundError(f"Checks configuration file not found: {file_path}")
 
     old_yaml_text = file_path.read_text(encoding="utf-8")
-    parser = get_yaml_parser()
+    parser = get_yaml_parser(old_yaml_text)
     doc = parser.load(old_yaml_text)
 
     # Detect list vs dictionary format
@@ -69,7 +72,26 @@ def modify_check_config(
 
     params = target_check["params"]
 
-    if action == "add_exclude":
+    if action in ("disable_check", "disable"):
+        target_check["enabled"] = False
+        if "enabled" in params:
+            del params["enabled"]
+
+    elif action in ("enable_check", "enable"):
+        target_check["enabled"] = True
+        if "enabled" in params:
+            del params["enabled"]
+
+    elif action == "set_enabled":
+        val = value if value is not None else True
+        if isinstance(val, str):
+            target_check["enabled"] = val.lower() in ("true", "1", "yes")
+        else:
+            target_check["enabled"] = bool(val)
+        if "enabled" in params:
+            del params["enabled"]
+
+    elif action == "add_exclude":
         items_to_add = values or ([str(value)] if value is not None else [])
         if not items_to_add:
             raise ValueError("No items provided to add to exclude list")
@@ -91,10 +113,22 @@ def modify_check_config(
     elif action == "set_param":
         if not key:
             raise ValueError("Parameter key is required for action 'set_param'")
-        params[key] = value
+        if key == "enabled":
+            if isinstance(value, str):
+                target_check["enabled"] = value.lower() in ("true", "1", "yes")
+            else:
+                target_check["enabled"] = bool(value)
+            if "enabled" in params:
+                del params["enabled"]
+        elif key == "interval_seconds":
+            target_check["interval_seconds"] = int(value)
+        else:
+            params[key] = value
 
     else:
-        raise ValueError(f"Unsupported action '{action}'. Supported: 'add_exclude', 'remove_exclude', 'set_param'")
+        raise ValueError(
+            f"Unsupported action '{action}'. Supported: 'disable_check', 'enable_check', 'add_exclude', 'remove_exclude', 'set_param'"
+        )
 
     # Dump modified document to string
     stream = io.StringIO()

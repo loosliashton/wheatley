@@ -45,8 +45,8 @@ flowchart TD
     subgraph PVE ["Proxmox Infrastructure"]
         Client -->|"REST API (TLS Pinned)"| Node1["Node 1 (e.g., Primary)"]
         Client -->|"REST API (TLS Pinned)"| Node2["Node 2 (e.g., Secondary)"]
-        Node1 --> Guests1["VMs & LXCs (Plex, Frigate, Docker)"]
-        Node2 --> Guests2["VMs & LXCs (Home Assistant)"]
+        Node1 --> Guests1["VMs & LXCs (Docker, Media, Apps)"]
+        Node2 --> Guests2["VMs & LXCs (Services, Databases)"]
     end
 ```
 
@@ -132,8 +132,8 @@ Available both inside the LXC container and from the Proxmox host via the conven
 # Auto-discover homelab services & guests across all Proxmox nodes
 wheatley discover
 
-# Export recommended draft configuration
-wheatley discover --output /etc/wheatley/config.draft.yaml
+# Export recommended checks configuration
+wheatley discover --output /etc/wheatley/checks.yaml
 
 # Validate configuration and secrets
 wheatley config validate
@@ -167,14 +167,14 @@ wheatley --help
 
 ### Telegram Bot Commands
 From your authorized Telegram chat:
-- **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is Frigate slow?"* or *"What guests are running on cave?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis across any configured LLM.
+- **Direct AI Chat** — Message Wheatley directly (e.g. *"Why is the web server slow?"* or *"What guests are running on pve-node-01?"*) for grounded, real-time homelab analysis with tool-assisted diagnosis across any configured LLM.
 - `/status` — Aggregates live cluster telemetry (CPU, RAM, uptime, and running/stopped guests across all configured nodes).
 - `/checks` — Displays real-time status of all monitored checks and active mute windows.
 - `/allowlist` — Lists all active custom allowlist rules, targets, and dates.
 - `/allowlist revoke <id>` — Revokes a custom command rule.
 - `/usage` — Displays current month & daily LLM token consumption and activity.
 - `/investigate <id>` — Triggers automated root-cause diagnosis on any service check.
-- `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute plex 120`).
+- `/mute <check_id> [mins]` — Temporarily silences alerts for a service (e.g. `/mute web-app 120`).
 - `/unmute <check_id>` — Re-enables alerts for a silenced check.
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
 - `/audit` — Views recent security, webhook, and operational audit events.
@@ -191,7 +191,3 @@ Detailed guides are available in the [`docs/`](docs/) directory:
 - [📋 Check Types Reference](docs/checks.md) — All built-in checks, options, and plugin extensibility.
 - [🛡️ Security & Safety Model](docs/security.md) — Unprivileged LXC, allowlists, and the interactive approval gate.
 - [🤖 LLM Provider Setup](docs/llm_providers.md) — Configuration for Gemini, Ollama, OpenAI, Groq, and vLLM.
-
-## License
-
-MIT License. Built for the homelab community.

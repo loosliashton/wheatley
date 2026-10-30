@@ -18,7 +18,6 @@ nodes:
     tls_fingerprint: "${NODE1_TLS_FINGERPRINT}"
     tokens:
       monitor: "${NODE1_TOKEN_MONITOR}"
-      ops: "${NODE1_TOKEN_OPS}"
 
   - name: pve-node-02
     api_url: "https://192.168.1.11:8006"
@@ -30,7 +29,6 @@ nodes:
     tls_fingerprint: "${NODE2_TLS_FINGERPRINT}"
     tokens:
       monitor: "${NODE2_TOKEN_MONITOR}"
-      ops: "${NODE2_TOKEN_OPS}"
 
 # Protect Wheatley from modifying its own container (node/vmid)
 self_guest: "pve-node-01/110"
@@ -58,7 +56,6 @@ chat:
     bot_token: "${TELEGRAM_BOT_TOKEN}"
     allowed_user_ids:
       - ${TELEGRAM_USER_ID}
-    pin: "${HIGH_RISK_PIN:-}"
 
 # Proxmox Notification Webhook Receiver (receives backup failure alerts etc.)
 webhook:

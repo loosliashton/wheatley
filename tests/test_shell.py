@@ -12,13 +12,13 @@ def test_config():
     return WheatleyConfig(
         nodes=[
             NodeConfig(
-                name="cave",
+                name="pve-node-01",
                 api_url="https://192.168.1.111:8006",
                 ssh=NodeSshConfig(host="192.168.1.111", port=22, user="wheatley"),
                 tokens=NodeTokensConfig(monitor="wheatley@pve!bot=sec", ops="wheatley@pve!ops=sec"),
             ),
             NodeConfig(
-                name="doug",
+                name="pve-node-02",
                 api_url="https://192.168.1.112:8006",
                 ssh=NodeSshConfig(host="192.168.1.112", port=22, user="wheatley"),
                 tokens=NodeTokensConfig(monitor="wheatley@pve!bot=sec", ops="wheatley@pve!ops=sec"),
@@ -56,7 +56,7 @@ async def test_execute_on_host_normal(test_config):
     with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
         mock_connect.return_value = mock_conn
 
-        res = await executor.execute_on_host("cave", "uptime")
+        res = await executor.execute_on_host("pve-node-01", "uptime")
         assert res.success
         assert res.stdout == "up 2 days\n"
         mock_conn.run.assert_called_once_with("uptime", check=False)
@@ -78,7 +78,7 @@ async def test_execute_on_host_adds_sudo_for_restricted(test_config):
     with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
         mock_connect.return_value = mock_conn
 
-        res = await executor.execute_on_host("cave", "pvesm status")
+        res = await executor.execute_on_host("pve-node-01", "pvesm status")
         assert res.success
         # Must have prefixed sudo
         mock_conn.run.assert_called_once_with("sudo pvesm status", check=False)
@@ -100,10 +100,10 @@ async def test_execute_in_lxc(test_config):
     with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
         mock_connect.return_value = mock_conn
 
-        res = await executor.execute_in_lxc("cave", 102, "systemctl is-active frigate")
+        res = await executor.execute_in_lxc("pve-node-01", 102, "systemctl is-active nginx")
         assert res.success
         assert res.stdout == "active\n"
-        expected_call = "sudo /usr/sbin/pct exec 102 -- /bin/bash -c 'systemctl is-active frigate'"
+        expected_call = "sudo /usr/sbin/pct exec 102 -- /bin/bash -c 'systemctl is-active nginx'"
         mock_conn.run.assert_called_once_with(expected_call, check=False)
 
 
@@ -126,7 +126,7 @@ async def test_execute_in_vm_parses_json(test_config):
     with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
         mock_connect.return_value = mock_conn
 
-        res = await executor.execute_in_vm("cave", 100, "docker ps --format '{{.Names}}'")
+        res = await executor.execute_in_vm("pve-node-01", 100, "docker ps --format '{{.Names}}'")
         assert res.success
         assert res.exit_code == 0
         assert res.stdout == "container1\ncontainer2\n"
@@ -141,7 +141,35 @@ async def test_execute_guest_spec(test_config):
             command="uptime", exit_code=0, stdout="up 5 days", stderr=""
         )
 
-        res = await executor.execute_guest_spec("cave/100", "uptime")
+        res = await executor.execute_guest_spec("pve-node-01/100", "uptime")
         assert res.success
         assert res.stdout == "up 5 days"
-        mock_exec_guest.assert_called_once_with("cave", 100, "uptime", timeout=30)
+        mock_exec_guest.assert_called_once_with("pve-node-01", 100, "uptime", timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_execute_in_guest_caches_lxc_type(test_config):
+    executor = ShellExecutor(test_config)
+
+    vm_fail = ShellResult(
+        command="uptime",
+        exit_code=2,
+        stdout="",
+        stderr="Configuration file 'nodes/pve-node-01/qemu-server/102.conf' does not exist",
+    )
+    lxc_ok = ShellResult(command="uptime", exit_code=0, stdout="up 10 days", stderr="")
+
+    with patch.object(executor, "execute_in_vm", new_callable=AsyncMock, return_value=vm_fail) as mock_vm, \
+         patch.object(executor, "execute_in_lxc", new_callable=AsyncMock, return_value=lxc_ok) as mock_lxc:
+        # First call probes VM, falls back to LXC, and caches "lxc"
+        res1 = await executor.execute_in_guest("pve-node-01", 102, "uptime")
+        assert res1.success
+        assert mock_vm.call_count == 1
+        assert mock_lxc.call_count == 1
+        assert executor._guest_type_cache.get("pve-node-01/102") == "lxc"
+
+        # Second call goes directly to LXC without calling execute_in_vm
+        res2 = await executor.execute_in_guest("pve-node-01", 102, "df -h")
+        assert res2.success
+        assert mock_vm.call_count == 1
+        assert mock_lxc.call_count == 2

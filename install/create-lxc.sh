@@ -189,6 +189,86 @@ if [[ "$START" == "true" ]]; then
     chmod 750 /etc/wheatley
   '
 
-  echo "Wheatley LXC provisioning complete!"
-  echo "CTID: $CTID is running at $IP"
+  REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [[ -f "${REPO_DIR}/pyproject.toml" ]]; then
+    echo "Copying Wheatley source tree into CT $CTID:/opt/wheatley..."
+    tar -C "$REPO_DIR" \
+      --exclude='./venv' \
+      --exclude='./.venv' \
+      --exclude='./__pycache__' \
+      --exclude='./.pytest_cache' \
+      -cf - . | pct exec "$CTID" -- tar -C /opt/wheatley -xf -
+  else
+    echo "Cloning Wheatley repository into CT $CTID:/opt/wheatley..."
+    pct exec "$CTID" -- git clone https://github.com/loosliashton/wheatley.git /opt/wheatley
+  fi
+
+  echo "Installing Wheatley Python environment and systemd service inside CT $CTID..."
+  pct exec "$CTID" -- bash -c '
+    chown -R wheatley:wheatley /opt/wheatley
+    git config --system --add safe.directory /opt/wheatley || true
+    su -s /bin/bash wheatley -c "python3 -m venv /opt/wheatley/venv && /opt/wheatley/venv/bin/pip install --upgrade pip && /opt/wheatley/venv/bin/pip install -e /opt/wheatley"
+    ln -sf /opt/wheatley/venv/bin/wheatley /usr/local/bin/wheatley
+    ln -sf /opt/wheatley/venv/bin/wheatley /usr/bin/wheatley
+
+    # Seed configuration templates if not already present
+    if [[ ! -f /etc/wheatley/config.yaml && -f /opt/wheatley/config.example.yaml ]]; then
+      cp /opt/wheatley/config.example.yaml /etc/wheatley/config.yaml
+      chown root:wheatley /etc/wheatley/config.yaml
+      chmod 640 /etc/wheatley/config.yaml
+    fi
+    if [[ ! -f /etc/wheatley/checks.yaml && -f /opt/wheatley/checks.example.yaml ]]; then
+      cp /opt/wheatley/checks.example.yaml /etc/wheatley/checks.yaml
+      chown wheatley:wheatley /etc/wheatley/checks.yaml
+      chmod 640 /etc/wheatley/checks.yaml
+    fi
+    if [[ ! -f /etc/wheatley/secrets.env && -f /opt/wheatley/secrets.example.env ]]; then
+      cp /opt/wheatley/secrets.example.env /etc/wheatley/secrets.env
+      chown wheatley:wheatley /etc/wheatley/secrets.env
+      chmod 600 /etc/wheatley/secrets.env
+    fi
+
+    # Install systemd service unit
+    if [[ -f /opt/wheatley/deploy/wheatley.service ]]; then
+      cp /opt/wheatley/deploy/wheatley.service /etc/systemd/system/wheatley.service
+      systemctl daemon-reload
+      systemctl enable wheatley
+    fi
+
+    # Generate SSH keypair for host/guest diagnostics
+    su -s /bin/bash wheatley -c "mkdir -p /var/lib/wheatley/.ssh && chmod 700 /var/lib/wheatley/.ssh && if [[ ! -f /var/lib/wheatley/.ssh/id_ed25519 ]]; then ssh-keygen -t ed25519 -N \"\" -C \"wheatley@ct-${HOSTNAME}\" -f /var/lib/wheatley/.ssh/id_ed25519 >/dev/null; fi"
+  '
+
+  PUBKEY=$(pct exec "$CTID" -- cat /var/lib/wheatley/.ssh/id_ed25519.pub 2>/dev/null || true)
+
+  # Authorize SSH key on local Proxmox host if wheatley user exists
+  if [[ -n "$PUBKEY" ]] && id -u wheatley >/dev/null 2>&1; then
+    mkdir -p /home/wheatley/.ssh
+    chmod 700 /home/wheatley/.ssh
+    if ! grep -Fxq "$PUBKEY" /home/wheatley/.ssh/authorized_keys 2>/dev/null; then
+      echo "$PUBKEY" >> /home/wheatley/.ssh/authorized_keys
+    fi
+    chmod 600 /home/wheatley/.ssh/authorized_keys
+    chown -R wheatley:wheatley /home/wheatley/.ssh
+    echo "Authorized CT $CTID SSH key for user 'wheatley' on local Proxmox host."
+  fi
+
+  echo ""
+  echo "================================================="
+  echo " Wheatley LXC provisioning complete!"
+  echo " CTID: $CTID is running at $IP"
+  echo "================================================="
+  if [[ -n "$PUBKEY" ]]; then
+    echo "Agent SSH Public Key:"
+    echo "  $PUBKEY"
+    echo ""
+    echo "To authorize additional Proxmox cluster nodes, run on each node:"
+    echo "  ./install/host-setup.sh --node-index 2 --ssh-key \"$PUBKEY\""
+    echo ""
+  fi
+  echo "Next steps (run 'pct enter $CTID'):"
+  echo "  1. Edit /etc/wheatley/secrets.env and /etc/wheatley/config.yaml"
+  echo "  2. Auto-discover checks: wheatley discover --output /etc/wheatley/checks.yaml"
+  echo "  3. Validate & start:     wheatley config validate && systemctl start wheatley"
+  echo "================================================="
 fi

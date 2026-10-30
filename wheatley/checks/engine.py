@@ -163,6 +163,8 @@ class CheckEngine:
             res.append({
                 "id": check_id,
                 "type": check.type,
+                "enabled": getattr(check.config, "enabled", True) if hasattr(check, "config") else True,
+                "params": getattr(check, "params", {}),
                 "status": state.last_status.value if state else "UNKNOWN",
                 "is_muted": state.is_muted if state else False,
                 "muted_until": state.muted_until if state else None,

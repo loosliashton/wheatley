@@ -145,3 +145,31 @@ async def test_execute_guest_spec(test_config):
         assert res.success
         assert res.stdout == "up 5 days"
         mock_exec_guest.assert_called_once_with("pve-node-01", 100, "uptime", timeout=30)
+
+
+@pytest.mark.asyncio
+async def test_execute_in_guest_caches_lxc_type(test_config):
+    executor = ShellExecutor(test_config)
+
+    vm_fail = ShellResult(
+        command="uptime",
+        exit_code=2,
+        stdout="",
+        stderr="Configuration file 'nodes/pve-node-01/qemu-server/102.conf' does not exist",
+    )
+    lxc_ok = ShellResult(command="uptime", exit_code=0, stdout="up 10 days", stderr="")
+
+    with patch.object(executor, "execute_in_vm", new_callable=AsyncMock, return_value=vm_fail) as mock_vm, \
+         patch.object(executor, "execute_in_lxc", new_callable=AsyncMock, return_value=lxc_ok) as mock_lxc:
+        # First call probes VM, falls back to LXC, and caches "lxc"
+        res1 = await executor.execute_in_guest("pve-node-01", 102, "uptime")
+        assert res1.success
+        assert mock_vm.call_count == 1
+        assert mock_lxc.call_count == 1
+        assert executor._guest_type_cache.get("pve-node-01/102") == "lxc"
+
+        # Second call goes directly to LXC without calling execute_in_vm
+        res2 = await executor.execute_in_guest("pve-node-01", 102, "df -h")
+        assert res2.success
+        assert mock_vm.call_count == 1
+        assert mock_lxc.call_count == 2

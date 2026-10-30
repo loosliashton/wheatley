@@ -41,8 +41,15 @@ def fake_context():
 @pytest.mark.asyncio
 async def test_guest_ip_resolution(fake_context):
     url = "http://{guest:pve-node-01/102}:32400/identity"
-    resolved = fake_context.resolve_string(url)
+    resolved = await fake_context.resolve_string_async(url)
     assert resolved == "http://192.168.1.102:32400/identity"
+
+    # Verify cache invalidation re-fetches updated DHCP IP
+    client = fake_context.get_client("pve-node-01")
+    client.get_guest_ips.return_value = ["192.168.1.202"]
+    assert await fake_context.resolve_string_async(url) == "http://192.168.1.102:32400/identity"
+    fake_context.invalidate_string_ips(url)
+    assert await fake_context.resolve_string_async(url) == "http://192.168.1.202:32400/identity"
 
 
 @pytest.mark.asyncio

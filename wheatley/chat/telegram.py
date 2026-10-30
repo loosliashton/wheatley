@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,10 +23,11 @@ from wheatley.audit import AuditLogger
 from wheatley.chat.base import ChatInterface
 from wheatley.chat.formatter import (
     markdown_to_telegram_html,
-    strip_html_tags,
     split_telegram_message,
+    strip_html_tags,
 )
 from wheatley.config import TelegramConfig
+from wheatley.orchestrator import ProposalOrchestrator
 from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.chat.telegram")
@@ -80,26 +82,31 @@ class TelegramBot(ChatInterface):
         status_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
         discovery_provider: Optional[Callable[[], Coroutine[Any, Any, str]]] = None,
         check_engine: Optional[Any] = None,
-        gemini_agent: Optional[Any] = None,
         llm_agent: Optional[Any] = None,
-        budget: Optional[Any] = None,
+        usage: Optional[Any] = None,
         shell: Optional[ShellExecutor] = None,
         approvals: Optional[ApprovalStore] = None,
-        **kwargs: Any,
+        orchestrator: Optional[ProposalOrchestrator] = None,
     ):
         self.config = config
         self.audit = audit
         self.status_provider = status_provider
         self.discovery_provider = discovery_provider
         self.check_engine = check_engine
-        self.agent = llm_agent or gemini_agent
-        self.budget = budget
+        self.agent = llm_agent
+        self.usage = usage
         self.shell = shell or getattr(self.agent, "shell", None)
         self.approvals = (
             approvals
-            or kwargs.get("approvals")
             or getattr(self.agent, "approvals", None)
-            or ApprovalStore(getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db"))
+            or ApprovalStore(getattr(audit, "db", getattr(audit, "db_path", "/var/lib/wheatley/wheatley.db")))
+        )
+        self.orchestrator = orchestrator or ProposalOrchestrator(
+            approvals=self.approvals,
+            audit=self.audit,
+            shell=self.shell,
+            check_engine=self.check_engine,
+            agent=self.agent,
         )
         self.allowed_users: Set[int] = set(config.allowed_user_ids)
         self.primary_chat_id: Optional[int] = config.allowed_user_ids[0] if config.allowed_user_ids else None
@@ -109,20 +116,18 @@ class TelegramBot(ChatInterface):
         self._register_internal_handlers()
 
     @property
-    def gemini_agent(self) -> Optional[Any]:
-        return self.agent
-
-    @gemini_agent.setter
-    def gemini_agent(self, value: Any) -> None:
-        self.agent = value
-
-    @property
     def llm_agent(self) -> Optional[Any]:
         return self.agent
 
     @llm_agent.setter
     def llm_agent(self, value: Any) -> None:
         self.agent = value
+        self.orchestrator.agent = value
+
+    def health(self) -> Dict[str, Any]:
+        """Return health status of the Telegram polling updater."""
+        updater_running = bool(self.app.updater and self.app.updater.running)
+        return {"ok": updater_running}
 
     def _is_authorized(self, update: Update) -> bool:
         if not update.effective_user:
@@ -417,14 +422,12 @@ class TelegramBot(ChatInterface):
     async def _cmd_usage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
-        if self.agent and hasattr(self.agent, "usage"):
-            msg = self.agent.usage.format_usage_markdown(
-                provider=getattr(self.agent, "provider_name", "llm"),
-                model=getattr(self.agent, "model_name", "default"),
+        tracker = (self.agent.usage if self.agent and hasattr(self.agent, "usage") else None) or self.usage
+        if tracker:
+            msg = tracker.format_usage_markdown(
+                provider=getattr(self.agent, "provider_name", "llm") if self.agent else "llm",
+                model=getattr(self.agent, "model_name", "default") if self.agent else "default",
             )
-            await self._send_or_reply(f"⚙️ [SYSTEM] {msg}", target=update.message)
-        elif self.budget:
-            msg = self.budget.format_usage_markdown()
             await self._send_or_reply(f"⚙️ [SYSTEM] {msg}", target=update.message)
         else:
             await self._send_or_reply("⚙️ [SYSTEM] Token usage tracker is not connected.", target=update.message)
@@ -514,8 +517,7 @@ class TelegramBot(ChatInterface):
 
         async with TypingIndicator(update.effective_chat):
             updater = WheatleyUpdater()
-            loop = asyncio.get_running_loop()
-            check_res = await loop.run_in_executor(None, updater.check_for_updates)
+            check_res = await asyncio.to_thread(updater.check_for_updates)
             if check_res.error:
                 await self._send_or_reply(
                     f"⚙️ [SYSTEM] *Update Check Failed:*\n`{check_res.error}`",
@@ -560,98 +562,45 @@ class TelegramBot(ChatInterface):
                 chat_id=update.effective_chat.id if update.effective_chat else None,
             )
 
-    async def _schedule_service_restart(self, delay_seconds: float = 2.0) -> None:
-        """Schedules a clean daemon exit after a delay so systemd (Restart=always) restarts the service."""
-        await asyncio.sleep(delay_seconds)
-        try:
-            import os
-            import signal
+    def _sync_orchestrator(self) -> None:
+        self.orchestrator.approvals = self.approvals
+        self.orchestrator.audit = self.audit
+        self.orchestrator.shell = self.shell
+        self.orchestrator.check_engine = self.check_engine
+        self.orchestrator.agent = self.agent
 
-            logger.info("Triggering clean process exit (SIGTERM) for systemd service restart...")
-            os.kill(os.getpid(), signal.SIGTERM)
-        except Exception as e:
-            logger.error("Failed to trigger service restart: %s", e)
+    async def _schedule_service_restart(self, delay_seconds: float = 2.0) -> None:
+        self._sync_orchestrator()
+        await self.orchestrator.schedule_service_restart(delay_seconds=delay_seconds)
 
     async def _execute_proposal_command(self, prop: Any) -> str:
-        if not prop:
-            return "❌ Proposal details not found."
+        self._sync_orchestrator()
+        return await self.orchestrator.execute_proposal_command(prop)
 
-        if getattr(prop, "proposal_type", "") == "CONFIG_UPDATE":
-            try:
-                import json
-                from pathlib import Path
-                import yaml as pyyaml
-                from wheatley.config import CheckConfig
-                from wheatley.tools.config_editor import apply_checks_file_update
+    async def _resume_agent_after_proposal(
+        self,
+        query: Any,
+        prop: Any,
+        decision: str,
+        execution_output: Optional[str] = None,
+    ) -> bool:
+        """Resume the LLM agent with a continuation prompt if configured."""
+        self._sync_orchestrator()
+        if not (self.agent and getattr(self.agent, "is_configured", False) and prop):
+            return False
 
-                payload = json.loads(prop.command)
-                filepath = Path(payload["file"])
-                new_yaml = payload["new_yaml"]
-                backup_path = apply_checks_file_update(filepath, new_yaml)
-
-                if self.check_engine:
-                    raw_data = pyyaml.safe_load(new_yaml)
-                    raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("checks", [])
-                    new_configs = [CheckConfig.model_validate(c) for c in raw_list]
-                    self.check_engine.reload_checks(new_configs)
-
-                return (
-                    f"⚙️ [SYSTEM] *Updated `{filepath.name}` successfully.*\n"
-                    f"• *Backup saved:* `{backup_path.name}`\n"
-                    f"• *Check Engine:* Reloaded with active configuration."
-                )
-            except Exception as e:
-                logger.exception("Failed to apply config update: %s", e)
-                return f"⚙️ [SYSTEM] *Failed to apply config update:* `{e}`"
-
-        elif getattr(prop, "proposal_type", "") == "SELF_UPDATE":
-            try:
-                from wheatley.updater import WheatleyUpdater
-
-                updater = WheatleyUpdater()
-                loop = asyncio.get_running_loop()
-                exec_res = await loop.run_in_executor(
-                    None, lambda: updater.perform_update(restart_service=False)
-                )
-                if not exec_res.success:
-                    return f"⚙️ [SYSTEM] *Update Failed:* {exec_res.message}"
-
-                # Schedule detached restart after brief delay to allow Telegram response delivery
-                asyncio.create_task(self._schedule_service_restart(delay_seconds=2.0))
-
-                return (
-                    f"⚙️ [SYSTEM] *Wheatley updated successfully!*\n"
-                    f"• Version: `{exec_res.old_commit}` ➡️ `{exec_res.new_commit}`\n"
-                    f"• Commits pulled: {len(exec_res.commits_pulled)}\n"
-                    f"• Service reload scheduled in 2 seconds."
-                )
-            except Exception as e:
-                logger.exception("Self-update failed: %s", e)
-                return f"⚙️ [SYSTEM] *Update error:* `{e}`"
-
-        executor = self.shell or (getattr(self.agent, "shell", None) if self.agent else None)
-        if not executor:
-            return "⚙️ [SYSTEM] Shell executor not available on bot."
-
-        target = prop.target.strip()
-        command = prop.command.strip()
+        chat_id = str(query.message.chat_id) if query.message else "default"
+        continuation = self.orchestrator.build_continuation_prompt(prop, decision, execution_output)
         try:
-            if "/" in target:
-                parts = target.split("/", 1)
-                node = parts[0]
-                vmid = int(parts[1])
-                res = await executor.execute_in_guest(node, vmid, command, timeout=30)
-            else:
-                res = await executor.execute_on_host(target, command, timeout=30)
-
-            output = res.stdout.strip() or res.stderr.strip() or "(no output)"
-            return (
-                f"⚙️ [SYSTEM] *Output on `{target}` (exit code {res.exit_code}):*\n"
-                f"```bash\n{output}\n```"
-            )
+            async with TypingIndicator(query.message.chat if query.message else None):
+                followup = await self.agent.chat(continuation, chat_id=chat_id)
+            await self._send_or_reply(followup, target=query.message)
+            target_cid = query.message.chat_id if query.message else None
+            await self._dispatch_agent_proposals(chat_id=target_cid)
+            return True
         except Exception as e:
-            logger.exception("Failed to execute proposal command: %s", e)
-            return f"⚙️ [SYSTEM] *Execution error on `{target}`:* `{e}`"
+            logger.exception("Agent failed to synthesize proposal continuation: %s", e)
+            return False
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -681,25 +630,7 @@ class TelegramBot(ChatInterface):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
 
-            agent_resumed = False
-            # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
-            if self.agent and getattr(self.agent, "is_configured", False) and prop:
-                chat_id = str(query.message.chat_id) if query.message else "default"
-                continuation = (
-                    f"Command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
-                    f"Execution output:\n{res}\n\n"
-                    "Please continue your analysis and answer my previous question based on this output."
-                )
-                try:
-                    async with TypingIndicator(query.message.chat if query.message else None):
-                        followup = await self.agent.chat(continuation, chat_id=chat_id)
-                    await self._send_or_reply(followup, target=query.message)
-                    target_cid = query.message.chat_id if query.message else None
-                    await self._dispatch_agent_proposals(chat_id=target_cid)
-                    agent_resumed = True
-                except Exception as e:
-                    logger.exception("Agent failed to synthesize proposal continuation: %s", e)
-
+            agent_resumed = await self._resume_agent_after_proposal(query, prop, "ALLOW_ONCE", res)
             if not agent_resumed:
                 await self._send_or_reply(res, target=query.message)
 
@@ -721,25 +652,7 @@ class TelegramBot(ChatInterface):
                 res = await self._execute_proposal_command(prop)
             self.approvals.record_execution(proposal_id, res[:500])
 
-            agent_resumed = False
-            # Resume reasoning loop with the approved command's output so Wheatley completes the inquiry
-            if self.agent and getattr(self.agent, "is_configured", False) and prop:
-                chat_id = str(query.message.chat_id) if query.message else "default"
-                continuation = (
-                    f"Command rule '{prop.pattern}' on target '{prop.target}' was permanently allowed and executed.\n"
-                    f"Execution output:\n{res}\n\n"
-                    "Please continue your analysis and answer my previous question based on this output."
-                )
-                try:
-                    async with TypingIndicator(query.message.chat if query.message else None):
-                        followup = await self.agent.chat(continuation, chat_id=chat_id)
-                    await self._send_or_reply(followup, target=query.message)
-                    target_cid = query.message.chat_id if query.message else None
-                    await self._dispatch_agent_proposals(chat_id=target_cid)
-                    agent_resumed = True
-                except Exception as e:
-                    logger.exception("Agent failed to synthesize proposal continuation: %s", e)
-
+            agent_resumed = await self._resume_agent_after_proposal(query, prop, "ALLOW_ALWAYS", res)
             if not agent_resumed:
                 await self._send_or_reply(res, target=query.message)
 
@@ -760,37 +673,7 @@ class TelegramBot(ChatInterface):
                     res = await self._execute_proposal_command(prop)
                 self.approvals.record_execution(proposal_id, res[:500])
 
-                agent_resumed = False
-                if self.agent and getattr(self.agent, "is_configured", False):
-                    chat_id = str(query.message.chat_id) if query.message else "default"
-                    if prop.proposal_type == "CONFIG_UPDATE":
-                        continuation = (
-                            f"Configuration update for '{prop.target}' was approved and applied.\n"
-                            f"Execution output:\n{res}\n\n"
-                            "Please confirm to the user that the configuration has been updated and the check engine reloaded."
-                        )
-                    elif prop.proposal_type == "SELF_UPDATE":
-                        continuation = (
-                            f"Wheatley self-update was approved and executed.\n"
-                            f"Execution output:\n{res}\n\n"
-                            "Please confirm the update to the user concisely."
-                        )
-                    else:
-                        continuation = (
-                            f"Action command '{prop.command}' on target '{prop.target}' was approved and executed.\n"
-                            f"Execution output:\n{res}\n\n"
-                            "Please confirm the result concisely to the user."
-                        )
-                    try:
-                        async with TypingIndicator(query.message.chat if query.message else None):
-                            followup = await self.agent.chat(continuation, chat_id=chat_id)
-                        await self._send_or_reply(followup, target=query.message)
-                        target_cid = query.message.chat_id if query.message else None
-                        await self._dispatch_agent_proposals(chat_id=target_cid)
-                        agent_resumed = True
-                    except Exception as e:
-                        logger.exception("Agent failed to synthesize proposal continuation: %s", e)
-
+                agent_resumed = await self._resume_agent_after_proposal(query, prop, "APPROVE", res)
                 if not agent_resumed:
                     await self._send_or_reply(res, target=query.message)
 
@@ -808,20 +691,7 @@ class TelegramBot(ChatInterface):
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, False, user_id)
 
-            if self.agent and getattr(self.agent, "is_configured", False) and prop:
-                chat_id = str(query.message.chat_id) if query.message else "default"
-                continuation = (
-                    f"Permission to run command '{prop.command}' on target '{prop.target}' was denied by the user.\n"
-                    "Conclude your previous inquiry without running or re-requesting this command."
-                )
-                try:
-                    async with TypingIndicator(query.message.chat if query.message else None):
-                        followup = await self.agent.chat(continuation, chat_id=chat_id)
-                    await self._send_or_reply(followup, target=query.message)
-                    target_cid = query.message.chat_id if query.message else None
-                    await self._dispatch_agent_proposals(chat_id=target_cid)
-                except Exception as e:
-                    logger.exception("Agent failed to handle denial continuation: %s", e)
+            await self._resume_agent_after_proposal(query, prop, "DENY")
 
         elif data.startswith("mute:"):
             parts = data.split(":")
@@ -962,7 +832,6 @@ class TelegramBot(ChatInterface):
             )
             diff_text = command
             try:
-                import json
                 data = json.loads(command)
                 diff_text = data.get("diff", command)
             except Exception:

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
+from pathlib import Path
 import sqlite3
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from wheatley.db import SQLiteDatabase
 from wheatley.llm.base import LLMMessage, ToolCall
 
 logger = logging.getLogger("wheatley.llm.memory")
@@ -18,15 +19,13 @@ logger = logging.getLogger("wheatley.llm.memory")
 class ConversationStore:
     """Manages chat history and session persistence in SQLite across service restarts."""
 
-    def __init__(self, db_path: str | Path = "/var/lib/wheatley/wheatley.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | Path | SQLiteDatabase = "/var/lib/wheatley/wheatley.db"):
+        self.db = SQLiteDatabase(db_path)
+        self.db_path = self.db.db_path
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self.db.connect()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -187,6 +186,19 @@ class ConversationStore:
                 return deleted
         except Exception as e:
             logger.warning("Failed to clear conversation history for %s: %s", chat_id, e)
+            return 0
+
+    def clear_all_history(self) -> int:
+        """Clear all conversation history across all chat_ids."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute("DELETE FROM conversations")
+                conn.commit()
+                deleted = cursor.rowcount
+                logger.info("Cleared all conversation history (%d rows deleted)", deleted)
+                return deleted
+        except Exception as e:
+            logger.warning("Failed to clear all conversation history: %s", e)
             return 0
 
     def cleanup_old_conversations(self, retention_days: int = 30) -> int:

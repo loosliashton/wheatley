@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml
@@ -81,21 +81,6 @@ class LLMConfig(BaseModel):
         return data
 
 
-class BudgetConfig(BaseModel):
-    """Deprecated: Legacy budget config retained for backwards compatibility."""
-    monthly_grant_usd: float = 0.0
-    starting_bank_usd: float = 0.0
-    warn_threshold_usd: float = 0.0
-    flash_only_threshold_usd: float = 0.0
-    pause_threshold_usd: float = 0.0
-    daily_cap_usd: float = 0.0
-    model_flash: str = "gemini-3.8-flash"
-    model_pro: str = "gemini-3.8-flash"
-    input_cost_per_million: float = 0.0
-    output_cost_per_million: float = 0.0
-    max_tool_iterations: int = 10
-
-
 class TelegramConfig(BaseModel):
     bot_token: str
     allowed_user_ids: List[int]
@@ -155,7 +140,6 @@ class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
     self_guest: Optional[str] = Field(None, description="e.g. pve-node-01/110 to protect agent self")
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    budget: BudgetConfig = Field(default_factory=BudgetConfig)
     chat: ChatConfig
     checks_file: Optional[str] = Field(None, description="Path to external checks.yaml file")
     checks: List[CheckConfig] = Field(default_factory=list)
@@ -176,32 +160,6 @@ class WheatleyConfig(BaseModel):
             "sensors -j",
         ]
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def handle_legacy_budget(cls, data: Any) -> Any:
-        """Map legacy budget block to llm block if llm is not explicitly provided."""
-        if isinstance(data, dict):
-            if "budget" in data and isinstance(data["budget"], dict):
-                logger.warning(
-                    "The 'budget:' section in configuration is deprecated and billing caps are removed. "
-                    "Use 'llm:' instead to configure your provider and model."
-                )
-                b = data["budget"]
-                if "llm" not in data:
-                    data["llm"] = {
-                        "provider": "gemini",
-                        "model": b.get("model_flash", "gemini-3.8-flash"),
-                        "max_tool_iterations": b.get("max_tool_iterations", 10),
-                    }
-            elif "llm" in data and isinstance(data["llm"], dict):
-                l_cfg = data["llm"]
-                if "budget" not in data:
-                    data["budget"] = {
-                        "model_flash": l_cfg.get("model", "gemini-3.8-flash"),
-                        "max_tool_iterations": l_cfg.get("max_tool_iterations", 10),
-                    }
-        return data
 
     @field_validator("nodes")
     @classmethod

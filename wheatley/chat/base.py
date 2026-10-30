@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Dict, Optional
 
 
 class ChatInterface(ABC):
@@ -34,6 +34,7 @@ class ChatInterface(ABC):
         risk: str,
         proposal_type: str = "ACTION",
         pattern: Optional[str] = None,
+        justification: Optional[str] = None,
         chat_id: Optional[int] = None,
     ) -> Any:
         """Send an interactive action or allowlist proposal with buttons."""
@@ -45,3 +46,7 @@ class ChatInterface(ABC):
     ) -> None:
         """Register a slash-command handler (e.g. /status, /audit)."""
         pass
+
+    def health(self) -> Dict[str, Any]:
+        """Return health status of the chat adapter for watchdog checks."""
+        return {"ok": True}

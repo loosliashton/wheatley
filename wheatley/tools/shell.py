@@ -4,7 +4,7 @@ Provides secure, non-interactive execution of read-only and approved commands:
 1. Host execution: via asyncssh to Proxmox VE nodes.
 2. LXC execution: via 'pct exec <vmid> -- <cmd>' on the host.
 3. VM execution: via 'qm guest exec <vmid> -- <cmd>' on the host with JSON parsing.
-4. Auto-detection of guest types (LXC vs QEMU).
+4. Auto-detection and caching of guest types (LXC vs QEMU).
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ class ShellExecutor:
         self.config = config
         self.nodes: Dict[str, NodeConfig] = {n.name: n for n in config.nodes}
         self._conns: Dict[str, asyncssh.SSHClientConnection] = {}
+        self._guest_type_cache: Dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     def get_node_config(self, node_name: str) -> Optional[NodeConfig]:
@@ -69,11 +70,9 @@ class ShellExecutor:
         async with self._lock:
             conn = self._conns.get(node_name)
             if conn is not None:
-                # Check if connection is still active
                 if not conn.is_closed():
                     return conn
-                else:
-                    self._conns.pop(node_name, None)
+                self._conns.pop(node_name, None)
 
             ssh_cfg = node.ssh
             key_paths = []
@@ -129,7 +128,6 @@ class ShellExecutor:
             )
         except Exception as e:
             logger.error("SSH execution error on node %s for '%s': %s", node, command, e)
-            # Remove stale connection if broken
             async with self._lock:
                 self._conns.pop(node, None)
             return ShellResult(
@@ -143,7 +141,6 @@ class ShellExecutor:
         self, node: str, vmid: int, command: str, timeout: int = 30
     ) -> ShellResult:
         """Execute a command inside an LXC container using pct exec."""
-        # Wrap in bash -c to preserve pipeline and argument semantics inside the container
         escaped_cmd = shlex.quote(command)
         pct_cmd = f"sudo /usr/sbin/pct exec {vmid} -- /bin/bash -c {escaped_cmd}"
         return await self.execute_on_host(node, pct_cmd, timeout=timeout)
@@ -173,7 +170,6 @@ class ShellExecutor:
                 timed_out=False,
             )
         except json.JSONDecodeError:
-            # Fallback to returning raw output
             return host_res
 
     async def execute_in_guest(
@@ -184,20 +180,28 @@ class ShellExecutor:
         guest_type: Optional[str] = None,
         timeout: int = 30,
     ) -> ShellResult:
-        """Execute inside a guest container or VM, automatically choosing pct vs qm."""
-        # If guest_type not specified, try to infer or default to qm/pct
-        if not guest_type:
-            # Quick check: try qm guest exec first; if VM not running or unknown, try pct
-            guest_type = "qemu"
+        """Execute inside a guest container or VM, caching guest type (lxc vs qemu) to avoid redundant SSH calls."""
+        cache_key = f"{node}/{vmid}"
+        effective_type = guest_type or self._guest_type_cache.get(cache_key)
 
-        if guest_type == "lxc":
+        if effective_type == "lxc":
+            self._guest_type_cache[cache_key] = "lxc"
             return await self.execute_in_lxc(node, vmid, command, timeout=timeout)
-        else:
-            res = await self.execute_in_vm(node, vmid, command, timeout=timeout)
-            # If qm failed with 'not a VM' or VM configuration error, try pct
-            if res.exit_code != 0 and ("Configuration file" in res.stderr or "does not exist" in res.stderr):
-                return await self.execute_in_lxc(node, vmid, command, timeout=timeout)
-            return res
+
+        if effective_type == "qemu":
+            self._guest_type_cache[cache_key] = "qemu"
+            return await self.execute_in_vm(node, vmid, command, timeout=timeout)
+
+        # Unknown guest type: probe VM first, fall back to LXC, and cache the detected type
+        res = await self.execute_in_vm(node, vmid, command, timeout=timeout)
+        if res.exit_code != 0 and ("Configuration file" in res.stderr or "does not exist" in res.stderr):
+            lxc_res = await self.execute_in_lxc(node, vmid, command, timeout=timeout)
+            if lxc_res.exit_code == 0 or ("Configuration file" not in lxc_res.stderr and "does not exist" not in lxc_res.stderr):
+                self._guest_type_cache[cache_key] = "lxc"
+            return lxc_res
+
+        self._guest_type_cache[cache_key] = "qemu"
+        return res
 
     async def execute_guest_spec(
         self, guest_spec: str, command: str, timeout: int = 30

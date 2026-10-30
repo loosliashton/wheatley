@@ -78,21 +78,6 @@ def test_llm_config_defaults():
     assert cfg.max_tool_iterations == 10
 
 
-def test_legacy_budget_block_adaptation():
-    # If legacy config has budget block, it maps to llm
-    data = {
-        "chat": {"telegram": {"bot_token": "fake", "allowed_user_ids": [123]}},
-        "budget": {
-            "model_flash": "gemini-3.8-flash",
-            "max_tool_iterations": 15,
-        },
-    }
-    cfg = WheatleyConfig.model_validate(data)
-    assert cfg.llm.provider == "gemini"
-    assert cfg.llm.model == "gemini-3.8-flash"
-    assert cfg.llm.max_tool_iterations == 15
-
-
 def test_provider_factory():
     # Gemini
     p_gemini = get_llm_provider(LLMConfig(provider="gemini", model="gemini-3.8-flash"))

@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 import signal
 import sys
-from pathlib import Path
 from typing import Any
 
 from wheatley.approvals import ApprovalStore
@@ -15,8 +15,10 @@ from wheatley.audit import AuditLogger
 from wheatley.chat.telegram import TelegramBot
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig, load_config
+from wheatley.db import SQLiteDatabase
 from wheatley.health import HealthMonitor
 from wheatley.llm import ConversationStore, LLMAgent, UsageTracker
+from wheatley.orchestrator import ProposalOrchestrator
 from wheatley.webhook import WebhookServer
 
 logging.basicConfig(
@@ -37,15 +39,15 @@ class WheatleyApp:
         self.config_path = config_path
         self.secrets_path = secrets_path
         self.config: WheatleyConfig = load_config(config_path, secrets_path)
-        self.audit = AuditLogger()
-        self.usage = UsageTracker(self.audit)
-        self.budget = self.usage  # Backwards compatibility alias
-        self.memory = ConversationStore(self.audit.db_path)
-        self.approvals = ApprovalStore(self.audit.db_path)
+        self.db = SQLiteDatabase()
+        self.audit = AuditLogger(self.db)
+        self.usage = UsageTracker(self.audit, db=self.db)
+        self.memory = ConversationStore(self.db)
+        self.approvals = ApprovalStore(self.db)
         self.bot: TelegramBot | None = None
         self.check_engine: CheckEngine | None = None
         self.llm_agent: LLMAgent | None = None
-        self.gemini_agent: LLMAgent | None = None
+        self.orchestrator: ProposalOrchestrator | None = None
         self.webhook_server: WebhookServer | None = None
         self.health = HealthMonitor(self.config.health)
         self._stop_event = asyncio.Event()
@@ -56,7 +58,6 @@ class WheatleyApp:
         lines = ["🤖 *Wheatley System Status*\n"]
 
         for node_cfg in self.config.nodes:
-            # Check if token is placeholder
             token_val = node_cfg.tokens.monitor or ""
             if "xxxx" in token_val or not token_val:
                 lines.append(f"⚪️ *Node: {node_cfg.name}*\n   ⚠️ Token unconfigured in secrets.env\n")
@@ -64,9 +65,8 @@ class WheatleyApp:
 
             try:
                 client = ProxmoxClient(node_cfg)
-                loop = asyncio.get_running_loop()
-                status = await loop.run_in_executor(None, client.get_node_status)
-                guests = await loop.run_in_executor(None, client.get_guests)
+                status = await asyncio.to_thread(client.get_node_status)
+                guests = await asyncio.to_thread(client.get_guests)
 
                 cpu_pct = round(status.get("cpu", 0) * 100, 1)
                 mem_data = status.get("memory", {})
@@ -89,7 +89,6 @@ class WheatleyApp:
                     f"   • *Guests:* `{len(running_guests)} running`, `{len(stopped_guests)} stopped`"
                 )
 
-                # Show running guests
                 if running_guests:
                     guest_bullets = []
                     for g in running_guests:
@@ -127,59 +126,67 @@ class WheatleyApp:
         logger.info("Starting Wheatley daemon...")
         self.audit.log_event("SYSTEM", "daemon", "startup", "SUCCESS")
 
-        # 1. Initialize Telegram bot if configured
-        if self.config.chat.telegram:
-            self.bot = TelegramBot(
-                config=self.config.chat.telegram,
-                audit=self.audit,
-                status_provider=self.get_status_overview,
-                discovery_provider=self.run_discovery_summary,
-                approvals=self.approvals,
-            )
+        async def _forward_alert(text: str, extra: dict[str, Any] | None = None) -> Any:
+            if self.bot:
+                return await self.bot.send_alert(text, extra)
+            return None
 
-        alert_sink = self.bot.send_alert if self.bot else None
-
-        # 2. Initialize and start Check Engine
+        # 1. Initialize and start Check Engine
         self.check_engine = CheckEngine(
             config=self.config,
             audit=self.audit,
-            alert_sink=alert_sink,
+            alert_sink=_forward_alert if self.config.chat.telegram else None,
         )
         self.check_engine.start()
         logger.info("Check Engine active with %d checks.", len(self.check_engine.checks))
 
-        # 3. Initialize LLM Agent
+        # 2. Initialize LLM Agent
         self.llm_agent = LLMAgent(
             config=self.config,
             audit=self.audit,
             usage=self.usage,
             check_engine=self.check_engine,
             proxmox_clients=self.check_engine.clients,
+            shell=self.check_engine.shell,
             memory=self.memory,
             approvals=self.approvals,
         )
-        self.gemini_agent = self.llm_agent  # Backwards compatibility
 
-        if self.bot:
-            self.bot.check_engine = self.check_engine
-            self.bot.agent = self.llm_agent
-            self.bot.llm_agent = self.llm_agent
-            self.bot.gemini_agent = self.llm_agent
-            self.bot.budget = self.usage
-            self.bot.shell = self.check_engine.shell
-            self.bot.approvals = self.approvals
+        # 3. Initialize ProposalOrchestrator & TelegramBot if configured
+        self.orchestrator = ProposalOrchestrator(
+            approvals=self.approvals,
+            audit=self.audit,
+            shell=self.check_engine.shell,
+            check_engine=self.check_engine,
+            agent=self.llm_agent,
+        )
 
-            # Wire LLMAgent proposal sink so interactive buttons are sent to Telegram
+        if self.config.chat.telegram:
+            self.bot = TelegramBot(
+                config=self.config.chat.telegram,
+                audit=self.audit,
+                status_provider=self.get_status_overview,
+                discovery_provider=self.run_discovery_summary,
+                check_engine=self.check_engine,
+                llm_agent=self.llm_agent,
+                usage=self.usage,
+                shell=self.check_engine.shell,
+                approvals=self.approvals,
+                orchestrator=self.orchestrator,
+            )
+
             async def _on_proposal(p: Any) -> None:
-                await self.bot.send_proposal(
-                    proposal_id=p.id,
-                    summary=p.summary,
-                    command=p.command,
-                    target=p.target,
-                    risk=p.risk,
-                    proposal_type=p.proposal_type,
-                    pattern=p.pattern,
-                )
+                if self.bot:
+                    await self.bot.send_proposal(
+                        proposal_id=p.id,
+                        summary=p.summary,
+                        command=p.command,
+                        target=p.target,
+                        risk=p.risk,
+                        proposal_type=p.proposal_type,
+                        pattern=p.pattern,
+                        justification=getattr(p, "justification", None),
+                    )
 
             self.llm_agent.proposal_sink = _on_proposal
 
@@ -190,11 +197,7 @@ class WheatleyApp:
             lambda: engine.health(self.config.health.stale_after_seconds),
         )
         if self.bot:
-            bot = self.bot
-            self.health.register(
-                "telegram",
-                lambda: {"ok": bool(bot.app.updater and bot.app.updater.running)},
-            )
+            self.health.register("telegram", self.bot.health)
 
         # 5. HTTP listener: PVE webhooks and/or the /health endpoint
         webhooks_on = bool(self.config.webhook and self.config.webhook.enabled)
@@ -203,7 +206,7 @@ class WheatleyApp:
             self.webhook_server = WebhookServer(
                 config=self.config.webhook,
                 audit=self.audit,
-                alert_sink=alert_sink,
+                alert_sink=self.bot.send_alert if self.bot else None,
                 health_monitor=self.health,
                 serve_webhooks=webhooks_on,
                 serve_health=health_on,
@@ -319,8 +322,8 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
 
 def cmd_check(args: argparse.Namespace) -> None:
-    from wheatley.checks.engine import CheckEngine
     from wheatley.checks.base import CheckStatus
+    from wheatley.checks.engine import CheckEngine
 
     try:
         cfg = load_config(args.config, args.secrets)
@@ -395,11 +398,6 @@ def cmd_usage(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-def cmd_budget(args: argparse.Namespace) -> None:
-    # Retained as backwards-compatible alias to usage
-    cmd_usage(args)
-
-
 def cmd_ask(args: argparse.Namespace) -> None:
     try:
         cfg = load_config(args.config, args.secrets)
@@ -435,16 +433,14 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
 def cmd_reset(args: argparse.Namespace) -> None:
     try:
-        audit = AuditLogger(getattr(args, "db", "/var/lib/wheatley/wheatley.db"))
-        memory = ConversationStore(audit.db_path)
+        db_path = getattr(args, "db", "/var/lib/wheatley/wheatley.db")
+        memory = ConversationStore(db_path)
         chat_id = getattr(args, "chat_id", None)
         if chat_id:
             count = memory.clear_history(chat_id)
             print(f"🧹 Cleared conversation memory for chat session '{chat_id}' ({count} messages deleted).")
         else:
-            with memory._get_conn() as conn:
-                count = conn.execute("DELETE FROM conversations").rowcount
-                conn.commit()
+            count = memory.clear_all_history()
             print(f"🧹 Cleared all stored conversation history ({count} messages deleted).")
     except Exception as e:
         print(f"❌ Reset error: {e}", file=sys.stderr)
@@ -483,16 +479,6 @@ def main() -> None:
     p_chk_run = p_chk_sub.add_parser("run", help="Run a specific check immediately")
     p_chk_run.add_argument("check_id", help="ID of the check to run")
     p_chk_sub.add_parser("run-all", help="Run all configured checks immediately")
-
-    # Budget (alias to usage)
-    p_bud = subparsers.add_parser("budget", help="Deprecated alias for 'usage'")
-    p_bud.add_argument("--config", "-c", default="/etc/wheatley/config.yaml")
-    p_bud.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env")
-    p_bud.add_argument("--db", default="/var/lib/wheatley/wheatley.db")
-    p_bud_sub = p_bud.add_subparsers(dest="budget_subcommand")
-    p_bud_sub.add_parser("usage", help="Show token consumption")
-    p_bud_bank = p_bud_sub.add_parser("set-bank", help="Legacy command (no-op)")
-    p_bud_bank.add_argument("amount", type=float, help="Amount in USD (e.g. 15.00)")
 
     # Discover
     p_disc = subparsers.add_parser("discover", help="Scan Proxmox nodes and auto-discover guests/services")
@@ -546,7 +532,7 @@ def main() -> None:
     elif args.command == "ask":
         cmd_ask(args)
 
-    elif args.command in ("usage", "budget"):
+    elif args.command == "usage":
         cmd_usage(args)
 
     elif args.command == "check":

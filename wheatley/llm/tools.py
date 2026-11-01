@@ -143,17 +143,36 @@ def build_tool_definitions() -> List[ToolDefinition]:
             name="propose_check_config_update",
             description=(
                 "Propose an update to the checks configuration file (checks.yaml) to enable/disable checks, "
+                "configure global or per-check monitoring pause schedules (maintenance/downtime windows), "
                 "add/remove container exclusions, adjust thresholds, or modify check parameters. "
                 "This creates an interactive proposal card for the user to review and approve with a diff before anything is changed."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "check_id": {"type": "string", "description": "The ID of the check to update (e.g. 'docker-containers')"},
+                    "check_id": {
+                        "type": "string",
+                        "description": "The ID of the check to update (e.g. 'docker-containers', 'guests-up'), or '*' / 'global' to modify the global monitoring schedule for all checks",
+                    },
                     "action": {
                         "type": "string",
-                        "enum": ["disable_check", "enable_check", "add_exclude", "remove_exclude", "set_param"],
-                        "description": "The type of configuration modification: 'disable_check' (to stop running a check), 'enable_check', 'add_exclude', 'remove_exclude', or 'set_param'",
+                        "enum": [
+                            "disable_check",
+                            "enable_check",
+                            "add_exclude",
+                            "remove_exclude",
+                            "set_param",
+                            "add_schedule",
+                            "set_schedule",
+                            "remove_schedule",
+                            "clear_schedule",
+                        ],
+                        "description": (
+                            "The type of configuration modification: 'disable_check', 'enable_check', "
+                            "'add_exclude', 'remove_exclude', 'set_param', "
+                            "'add_schedule' (add a recurring pause window), 'set_schedule' (replace pause windows), "
+                            "'remove_schedule' (remove a matching pause window), or 'clear_schedule' (remove all pause windows)"
+                        ),
                     },
                     "key": {"type": "string", "description": "Parameter key to update (e.g. 'exclude' or parameter name)"},
                     "values": {
@@ -162,6 +181,14 @@ def build_tool_definitions() -> List[ToolDefinition]:
                         "description": "List of string values (e.g. 'node/vmid' like 'cave/110' for guest_state exclusions, or container names for docker exclusions)",
                     },
                     "value": {"type": "string", "description": "Scalar value if setting a single parameter"},
+                    "start": {"type": "string", "description": "Schedule window start time in 24-hour HH:MM format (e.g. '02:00')"},
+                    "end": {"type": "string", "description": "Schedule window end time in 24-hour HH:MM format (e.g. '04:00')"},
+                    "days": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional days of week for schedule window (e.g. ['sat', 'sun'], ['mon', 'tue', 'wed', 'thu', 'fri']). Omit for daily.",
+                    },
+                    "reason": {"type": "string", "description": "Optional reason/label for the scheduled downtime window (e.g. 'Nightly backups')"},
                     "summary": {"type": "string", "description": "Clear explanation of the proposed change"},
                 },
                 "required": ["check_id", "action", "summary"],
@@ -234,11 +261,15 @@ class AgentToolbox:
                 )
             elif name == "propose_check_config_update":
                 return self.propose_check_config_update(
-                    check_id=args.get("check_id", ""),
+                    check_id=args.get("check_id", "*"),
                     action=args.get("action", "add_exclude"),
                     key=args.get("key"),
                     values=args.get("values"),
                     value=args.get("value"),
+                    start=args.get("start"),
+                    end=args.get("end"),
+                    days=args.get("days"),
+                    reason=args.get("reason"),
                     summary=args.get("summary", ""),
                 )
             else:
@@ -324,7 +355,7 @@ class AgentToolbox:
         for s in states:
             chk = self.check_engine.checks.get(s["id"]) if hasattr(self.check_engine, "checks") and isinstance(self.check_engine.checks, dict) else None
             params = s.get("params") if "params" in s else (getattr(chk, "params", {}) if chk else {})
-            summary.append({
+            item: Dict[str, Any] = {
                 "id": s["id"],
                 "type": s["type"],
                 "status": s["status"],
@@ -332,8 +363,23 @@ class AgentToolbox:
                 "consecutive_failures": s["consecutive_failures"],
                 "summary": s["last_result"].summary if s.get("last_result") else None,
                 "params": params,
-            })
-        return {"checks": summary}
+            }
+            if s.get("schedule"):
+                item["schedule"] = s["schedule"]
+            if s.get("is_scheduled_pause"):
+                item["is_scheduled_pause"] = True
+                item["active_schedule_window"] = s.get("active_schedule_window")
+            summary.append(item)
+
+        res: Dict[str, Any] = {"checks": summary}
+        eng_cfg = getattr(self.check_engine, "config", None) or self.config
+        global_sched = getattr(eng_cfg, "schedule", None)
+        if isinstance(global_sched, list) and global_sched:
+            res["global_schedule"] = [
+                w.model_dump(exclude_none=True) if hasattr(w, "model_dump") else w
+                for w in global_sched
+            ]
+        return res
 
     async def run_health_check(self, check_id: str) -> Dict[str, Any]:
         if not self.check_engine:
@@ -483,6 +529,10 @@ class AgentToolbox:
         key: Optional[str] = None,
         values: Optional[List[str]] = None,
         value: Any = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        days: Optional[Any] = None,
+        reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         from wheatley.tools.config_editor import modify_check_config
 
@@ -505,6 +555,10 @@ class AgentToolbox:
                 key=key,
                 values=values,
                 value=value,
+                start=start,
+                end=end,
+                days=days,
+                reason=reason,
             )
         except Exception as e:
             logger.warning("Failed to construct check config update: %s", e)

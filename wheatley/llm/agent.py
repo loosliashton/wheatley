@@ -108,12 +108,25 @@ class LLMAgent:
         if self.check_engine:
             states = self.check_engine.get_check_states()
             for s in states:
-                status_str = f"MUTED until {s['muted_until'].strftime('%H:%M UTC')}" if s["is_muted"] else s["status"]
+                if s["is_muted"]:
+                    status_str = f"MUTED until {s['muted_until'].strftime('%H:%M UTC')}"
+                elif s.get("is_scheduled_pause"):
+                    win = s.get("active_schedule_window") or {}
+                    status_str = f"PAUSED by schedule ({win.get('start')}-{win.get('end')})"
+                else:
+                    status_str = s["status"]
                 checks_info.append(f"• {s['id']} ({s['type']}): {status_str}")
         else:
             for c in self.config.checks:
                 if c.enabled:
                     checks_info.append(f"• {c.id} ({c.type})")
+
+        global_sched = [w.format_short() for w in getattr(self.config, "schedule", [])]
+        schedule_line = (
+            f"Global Pause Schedule: {', '.join(global_sched)}"
+            if global_sched
+            else "Global Pause Schedule: None configured"
+        )
 
         lines = [
             "You are Wheatley, an autonomous homelab monitoring and administration assistant for Proxmox VE.",
@@ -125,12 +138,13 @@ class LLMAgent:
             "",
             "Active Health Checks:",
             "\n".join(checks_info) if checks_info else "No health checks active.",
+            schedule_line,
             "",
             f"Agent Self-Protection: Guest '{self.config.self_guest or 'disabled'}' is running Wheatley. Never perform disruptive actions on this guest.",
             "",
             "## Core Operational Rules & Constraints",
             "1. Read-Only Diagnostics: Run diagnostic queries immediately using available tools. Always check live telemetry or recent logs before forming conclusions.",
-            "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call the 'propose_action' function so the user can review and approve it via Telegram buttons.",
+            "2. Interactive Approval Gate for State Changes: You CANNOT mutate system state directly. If the user asks you to start, stop, restart, destroy, or modify any guest or configuration, you must first diagnose, explain the proposed command, and call 'propose_action' (or 'propose_check_config_update' for checks.yaml exclusions, parameters, and monitoring schedules) so the user can review and approve it via Telegram buttons.",
             "3. Telegram Mobile Formatting: Homelab administrators read your messages on Telegram mobile screens. Format your answers cleanly: use bullet points (•) for lists, **bold** for key names and metrics, and triple-backtick code blocks for CLI commands. Avoid markdown tables (they do not render well on mobile; format tabular data as bullet lists instead).",
             "4. Grounded in Facts: Base all diagnostic answers on tool output. If a service is down, report the exact status code, latency, or error message.",
             "5. Host & Guest Diagnostic Execution: You have access to 'run_host_command' and 'run_guest_command' to execute read-only diagnostic commands directly (e.g. lsblk, smartctl, sensors, uptime, free, df, docker ps, docker logs, systemctl status, journalctl). When calling these tools, you MUST provide a meaningful 'summary' explaining what the command does in plain English (do not just repeat the command) and a 'justification' explaining why this specific command is required. Non-allowlisted commands will automatically produce an interactive approval proposal for the user showing your summary and justification.",
@@ -207,6 +221,10 @@ class LLMAgent:
         key: Optional[str] = None,
         values: Optional[List[str]] = None,
         value: Any = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        days: Optional[Any] = None,
+        reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         self._sync_toolbox_refs()
         return self.toolbox.propose_check_config_update(
@@ -216,6 +234,10 @@ class LLMAgent:
             key=key,
             values=values,
             value=value,
+            start=start,
+            end=end,
+            days=days,
+            reason=reason,
         )
 
     @staticmethod

@@ -209,3 +209,68 @@ def test_apply_checks_file_update_readonly_parent(tmp_path: Path):
     finally:
         sub_dir.chmod(0o755)
 
+
+def test_per_check_schedule_actions(tmp_path: Path):
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")
+
+    # 1. Add a schedule window to docker-containers
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="docker-containers",
+        action="add_schedule",
+        start="02:00",
+        end="04:00",
+        days=["sun"],
+        reason="Weekly backup",
+    )
+    assert "+    schedule:" in diff or "+  schedule:" in diff
+    docker_cfg = next(c for c in configs if c.id == "docker-containers")
+    assert len(docker_cfg.schedule) == 1
+    assert docker_cfg.schedule[0].start == "02:00"
+    assert docker_cfg.schedule[0].end == "04:00"
+    assert docker_cfg.schedule[0].days == ["sun"]
+    assert docker_cfg.schedule[0].reason == "Weekly backup"
+
+    # 2. Remove the schedule window
+    yaml_file.write_text(new_yaml, encoding="utf-8")
+    new_yaml2, diff2, configs2 = modify_check_config(
+        file_path=yaml_file,
+        check_id="docker-containers",
+        action="remove_schedule",
+        start="02:00",
+        end="04:00",
+    )
+    docker_cfg2 = next(c for c in configs2 if c.id == "docker-containers")
+    assert len(docker_cfg2.schedule) == 0
+
+
+def test_global_schedule_actions(tmp_path: Path):
+    yaml_file = tmp_path / "checks.yaml"
+    yaml_file.write_text(SAMPLE_CHECKS_YAML, encoding="utf-8")
+
+    # 1. Add a global schedule window via check_id="*"
+    new_yaml, diff, configs = modify_check_config(
+        file_path=yaml_file,
+        check_id="*",
+        action="add_schedule",
+        start="23:00",
+        end="05:00",
+        days="weekdays",
+        reason="Overnight quiet hours",
+    )
+    assert "schedule:" in new_yaml
+    assert "23:00" in new_yaml
+    assert "05:00" in new_yaml
+    assert "# Header comment" in new_yaml
+
+    # 2. Clear the global schedule
+    yaml_file.write_text(new_yaml, encoding="utf-8")
+    new_yaml2, diff2, _ = modify_check_config(
+        file_path=yaml_file,
+        check_id="global",
+        action="clear_schedule",
+    )
+    assert "23:00" not in new_yaml2
+
+

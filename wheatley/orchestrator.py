@@ -13,7 +13,7 @@ import yaml as pyyaml
 
 from wheatley.approvals import ApprovalStore, Proposal
 from wheatley.audit import AuditLogger
-from wheatley.config import CheckConfig
+from wheatley.config import CheckConfig, ScheduleWindow
 from wheatley.tools.config_editor import apply_checks_file_update
 from wheatley.tools.shell import ShellExecutor
 
@@ -62,7 +62,17 @@ class ProposalOrchestrator:
                     raw_data = pyyaml.safe_load(new_yaml)
                     raw_list = raw_data if isinstance(raw_data, list) else raw_data.get("checks", [])
                     new_configs = [CheckConfig.model_validate(c) for c in raw_list]
-                    self.check_engine.reload_checks(new_configs)
+                    raw_sched = []
+                    if isinstance(raw_data, dict):
+                        for sched_key in ("schedule", "pause_windows", "maintenance_windows", "quiet_hours"):
+                            if sched_key in raw_data and raw_data[sched_key] is not None:
+                                raw_sched = raw_data[sched_key]
+                                break
+                    new_schedule = [ScheduleWindow.model_validate(w) for w in raw_sched]
+                    try:
+                        self.check_engine.reload_checks(new_configs, new_schedule=new_schedule)
+                    except TypeError:
+                        self.check_engine.reload_checks(new_configs)
 
                 return (
                     f"⚙️ [SYSTEM] *Updated `{filepath.name}` successfully.*\n"

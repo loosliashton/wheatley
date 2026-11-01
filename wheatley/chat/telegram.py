@@ -361,17 +361,30 @@ class TelegramBot(ChatInterface):
             return
 
         lines = [f"⚙️ [SYSTEM] *Wheatley Monitored Checks ({len(states)})*\n"]
+        global_sched = getattr(self.check_engine.config, "schedule", [])
+        if global_sched:
+            sched_strs = [f"`{w.format_short()}`" for w in global_sched]
+            lines.append(f"🗓️ *Global Pause Windows:* {', '.join(sched_strs)}\n")
+
         for s in states:
             cid = s["id"]
             ctype = s["type"]
             status = s["status"]
             is_muted = s["is_muted"]
             muted_until = s["muted_until"]
+            is_sched_pause = s.get("is_scheduled_pause", False)
+            active_win = s.get("active_schedule_window")
 
             if is_muted:
                 until_str = muted_until.strftime("%H:%M UTC") if muted_until else "muted"
                 icon = "🔕"
                 status_str = f"MUTED (until {until_str})"
+            elif is_sched_pause and active_win:
+                icon = "⏸️"
+                win_label = f"{active_win['start']}-{active_win['end']}"
+                if active_win.get("reason"):
+                    win_label += f": {active_win['reason']}"
+                status_str = f"PAUSED ({win_label})"
             elif status == "OK":
                 icon = "🟢"
                 status_str = "OK"
@@ -385,7 +398,13 @@ class TelegramBot(ChatInterface):
                 icon = "⚪️"
                 status_str = status
 
-            lines.append(f"{icon} `{cid}` ({ctype}): *{status_str}*")
+            chk_sched = s.get("schedule") or []
+            sched_suffix = ""
+            if chk_sched and not is_sched_pause:
+                win_list = ", ".join(f"{w['start']}-{w['end']}" for w in chk_sched)
+                sched_suffix = f" _(pause: {win_list})_"
+
+            lines.append(f"{icon} `{cid}` ({ctype}): *{status_str}*{sched_suffix}")
 
         lines.append("\n_Use `/mute <id> [mins]` to silence alerts, or `/unmute <id>`._")
         await self._send_or_reply("\n".join(lines), target=update.message)

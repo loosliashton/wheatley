@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml
 
@@ -104,12 +105,146 @@ class ChatConfig(BaseModel):
     telegram: Optional[TelegramConfig] = None
 
 
+VALID_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAY_ALIASES = {
+    "monday": "mon", "mon": "mon",
+    "tuesday": "tue", "tue": "tue", "tues": "tue",
+    "wednesday": "wed", "wed": "wed",
+    "thursday": "thu", "thu": "thu", "thur": "thu", "thurs": "thu",
+    "friday": "fri", "fri": "fri",
+    "saturday": "sat", "sat": "sat",
+    "sunday": "sun", "sun": "sun",
+}
+TIME_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _parse_hhmm(value: Any) -> Tuple[int, int]:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1440:
+        # Handle YAML 1.1 sexagesimal integer conversion (e.g., unquoted 23:00 -> 1380)
+        return divmod(value, 60)
+    m = TIME_HHMM_RE.match(str(value).strip())
+    if not m:
+        raise ValueError(f"Invalid time format '{value}'; expected HH:MM (24-hour, e.g. '02:00')")
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Time '{value}' out of range (00:00 to 23:59)")
+    return hour, minute
+
+
+class ScheduleWindow(BaseModel):
+    """Recurring time window during which monitoring is paused."""
+
+    start: str = Field(..., description="Start time in 24-hour HH:MM format (local time), e.g. '02:00'")
+    end: str = Field(..., description="End time in 24-hour HH:MM format (local time), e.g. '04:00'")
+    days: Optional[List[str]] = Field(
+        None,
+        description="Optional days of week (mon, tue, wed, thu, fri, sat, sun). Omit for every day.",
+    )
+    reason: Optional[str] = Field(None, description="Optional note explaining the scheduled downtime")
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def normalize_time(cls, v: Any) -> str:
+        hour, minute = _parse_hhmm(v)
+        return f"{hour:02d}:{minute:02d}"
+
+    @field_validator("days", mode="before")
+    @classmethod
+    def normalize_days(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            raw = v.strip().lower()
+            if not raw or raw in ("*", "all", "daily", "everyday", "every day"):
+                return None
+            if raw in ("weekday", "weekdays"):
+                return ["mon", "tue", "wed", "thu", "fri"]
+            if raw in ("weekend", "weekends"):
+                return ["sat", "sun"]
+            items = [p.strip() for p in raw.split(",") if p.strip()]
+        elif isinstance(v, list):
+            items = [str(x).strip().lower() for x in v if str(x).strip()]
+        else:
+            raise ValueError(f"Invalid days specification: {v}")
+
+        if not items or items == ["*"] or items == ["all"] or items == ["daily"]:
+            return None
+
+        normalized: List[str] = []
+        for item in items:
+            if item in ("weekday", "weekdays"):
+                for d in ("mon", "tue", "wed", "thu", "fri"):
+                    if d not in normalized:
+                        normalized.append(d)
+                continue
+            if item in ("weekend", "weekends"):
+                for d in ("sat", "sun"):
+                    if d not in normalized:
+                        normalized.append(d)
+                continue
+            mapped = DAY_ALIASES.get(item)
+            if not mapped:
+                raise ValueError(f"Invalid day of week '{item}'; expected mon..sun")
+            if mapped not in normalized:
+                normalized.append(mapped)
+        return normalized or None
+
+    def is_active(self, now: Optional[datetime] = None) -> bool:
+        """Return True if the given datetime (defaults to current local system time) falls inside this window."""
+        dt = now if now is not None else datetime.now().astimezone()
+        sh, sm = _parse_hhmm(self.start)
+        eh, em = _parse_hhmm(self.end)
+        start_mins = sh * 60 + sm
+        end_mins = eh * 60 + em
+        curr_mins = dt.hour * 60 + dt.minute
+
+        today_day = VALID_DAYS[dt.weekday()]
+        prev_day = VALID_DAYS[(dt.weekday() - 1) % 7]
+
+        if start_mins == end_mins:
+            # 24-hour window on matching days
+            return self.days is None or today_day in self.days
+
+        if start_mins < end_mins:
+            # Same-day window (e.g. 02:00 -> 04:00)
+            if self.days is not None and today_day not in self.days:
+                return False
+            return start_mins <= curr_mins < end_mins
+
+        # Overnight window crossing midnight (e.g. 23:00 -> 05:00)
+        if curr_mins >= start_mins:
+            return self.days is None or today_day in self.days
+        if curr_mins < end_mins:
+            return self.days is None or prev_day in self.days
+        return False
+
+    def format_short(self) -> str:
+        """Return a concise human-readable description of this window."""
+        days_str = ",".join(self.days) if self.days else "daily"
+        base = f"{self.start}-{self.end} ({days_str})"
+        if self.reason:
+            return f"{base} — {self.reason}"
+        return base
+
+
 class CheckConfig(BaseModel):
     id: str
     type: str
     enabled: bool = True
     interval_seconds: int = 60
+    schedule: List[ScheduleWindow] = Field(default_factory=list)
     params: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_schedule_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "schedule" not in data:
+            for alias in ("pause_windows", "maintenance_windows", "quiet_hours"):
+                if alias in data:
+                    data = dict(data)
+                    data["schedule"] = data.pop(alias)
+                    break
+        return data
 
 
 class WebhookConfig(BaseModel):
@@ -142,6 +277,10 @@ class WheatleyConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     chat: ChatConfig
     checks_file: Optional[str] = Field(None, description="Path to external checks.yaml file")
+    schedule: List[ScheduleWindow] = Field(
+        default_factory=list,
+        description="Global monitoring pause windows loaded from checks.yaml",
+    )
     checks: List[CheckConfig] = Field(default_factory=list)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
@@ -229,8 +368,13 @@ def load_config(config_path: str | Path, secrets_path: Optional[str | Path] = No
             checks_data = yaml.safe_load(interp_checks)
             if isinstance(checks_data, list):
                 data["checks"] = checks_data
-            elif isinstance(checks_data, dict) and "checks" in checks_data:
-                data["checks"] = checks_data["checks"]
+            elif isinstance(checks_data, dict):
+                if "checks" in checks_data:
+                    data["checks"] = checks_data["checks"]
+                for sched_key in ("schedule", "pause_windows", "maintenance_windows", "quiet_hours"):
+                    if sched_key in checks_data and checks_data[sched_key] is not None:
+                        data["schedule"] = checks_data[sched_key]
+                        break
             data["checks_file"] = str(resolved_checks_file)
             logger.info("Loaded checks from %s", resolved_checks_file)
         except Exception as e:

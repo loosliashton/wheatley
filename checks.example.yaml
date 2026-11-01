@@ -5,9 +5,17 @@
 #
 # Keeping checks in checks.yaml isolates your cluster topology and credentials
 # (in config.yaml and secrets.env) from routine check configuration and allows
-# Wheatley to safely propose and apply threshold or exclusion updates (such as
-# excluding dormant Docker containers) after interactive confirmation in Telegram.
+# Wheatley to safely propose and apply threshold, exclusion, or schedule updates
+# (such as excluding dormant Docker containers or scheduling maintenance pauses)
+# after interactive confirmation in Telegram.
 # ==============================================================================
+
+# Optional global pause schedule (applies to all checks during local HH:MM windows)
+# schedule:
+#   - start: "02:00"
+#     end: "04:00"
+#     days: ["sun"]       # Optional: mon..sun, "weekdays", or "weekends" (omit for daily)
+#     reason: "Weekly Proxmox Backup Server window"
 
 checks:
   # Cluster & Node Health
@@ -53,6 +61,11 @@ checks:
     type: http
     enabled: true
     interval_seconds: 60
+    # Optional per-check pause schedule (local HH:MM, supports overnight e.g. 23:00-05:00)
+    # schedule:
+    #   - start: "03:00"
+    #     end: "03:30"
+    #     reason: "Nightly library maintenance"
     params:
       url: "http://{guest:pve-node-01/103}:32400/identity"
 

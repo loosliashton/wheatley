@@ -315,3 +315,64 @@ def test_load_plugin_checks():
         cls = get_check_class("dummy_plugin")
         assert cls is DummyPluginCheck
         assert "dummy_plugin" in CHECK_REGISTRY
+
+
+def test_schedule_window_active():
+    from datetime import datetime
+    from wheatley.config import ScheduleWindow
+
+    # 1. Same-day window: 02:00 to 04:00 daily
+    win_daily = ScheduleWindow(start="02:00", end="04:00", reason="Nightly backup")
+    assert win_daily.is_active(datetime(2026, 11, 1, 2, 30)) is True
+    assert win_daily.is_active(datetime(2026, 11, 1, 4, 0)) is False
+    assert win_daily.is_active(datetime(2026, 11, 1, 1, 59)) is False
+
+    # 2. Overnight window crossing midnight: 23:00 to 05:00 on Sunday (2026-11-01 is Sunday)
+    win_overnight = ScheduleWindow(start="23:00", end="05:00", days=["sun"])
+    # Sunday 23:30 -> active (started on Sunday)
+    assert win_overnight.is_active(datetime(2026, 11, 1, 23, 30)) is True
+    # Monday 03:15 -> active (started on Sunday night)
+    assert win_overnight.is_active(datetime(2026, 11, 2, 3, 15)) is True
+    # Monday 23:30 -> inactive (Monday is not in days=["sun"])
+    assert win_overnight.is_active(datetime(2026, 11, 2, 23, 30)) is False
+    # Sunday 03:15 -> inactive (that would have started Saturday night)
+    assert win_overnight.is_active(datetime(2026, 11, 1, 3, 15)) is False
+
+
+@pytest.mark.asyncio
+async def test_check_engine_scheduled_pause(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    audit = AuditLogger(db_path)
+
+    # 00:00 to 00:00 is a 24h pause window
+    cfg = WheatleyConfig.model_validate({
+        "chat": {"telegram": {"bot_token": "fake", "allowed_user_ids": [123]}},
+        "checks": [
+            {
+                "id": "http-paused",
+                "type": "http",
+                "enabled": True,
+                "interval_seconds": 60,
+                "schedule": [{"start": "00:00", "end": "00:00", "reason": "Maintenance"}],
+                "params": {"url": "http://127.0.0.1:8080/health"},
+            }
+        ],
+    })
+
+    alerts_received = []
+
+    async def mock_alert_sink(msg: str, extra: dict):
+        alerts_received.append((msg, extra))
+
+    engine = CheckEngine(cfg, audit, alert_sink=mock_alert_sink)
+
+    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_req:
+        res = await engine.execute_check("http-paused")
+        # Should skip calling HTTP altogether and preserve OK state without alerting
+        mock_req.assert_not_called()
+        assert res.status == CheckStatus.OK
+        assert "Paused by schedule" in res.summary
+        assert len(alerts_received) == 0
+        states = engine.get_check_states()
+        assert states[0]["is_scheduled_pause"] is True
+

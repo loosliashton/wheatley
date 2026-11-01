@@ -19,7 +19,7 @@ from wheatley.checks.base import (
     load_plugin_checks,
 )
 import wheatley.checks.builtin  # noqa: F401 - ensure built-ins are registered
-from wheatley.config import CheckConfig, WheatleyConfig
+from wheatley.config import CheckConfig, ScheduleWindow, WheatleyConfig
 from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
@@ -92,10 +92,16 @@ class CheckEngine:
             self.checks[chk_cfg.id] = instance
             self.states[chk_cfg.id] = CheckState(check_id=chk_cfg.id)
 
-    def reload_checks(self, new_checks: List[CheckConfig]) -> None:
-        """Dynamically reload checks without restarting the daemon process."""
+    def reload_checks(
+        self,
+        new_checks: List[CheckConfig],
+        new_schedule: Optional[List[ScheduleWindow]] = None,
+    ) -> None:
+        """Dynamically reload checks and monitoring schedules without restarting the daemon process."""
         logger.info("Reloading check engine with %d checks...", len(new_checks))
         self.config.checks = new_checks
+        if new_schedule is not None:
+            self.config.schedule = new_schedule
         new_check_ids = {c.id for c in new_checks if c.enabled}
 
         # Cancel jobs for removed or disabled checks
@@ -155,16 +161,38 @@ class CheckEngine:
         self.audit.log_event("CHECK", "engine", f"unmute:{check_id}", "UNMUTED")
         return True
 
+    def get_active_schedule_window(
+        self,
+        check_id: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[ScheduleWindow]:
+        """Return the active pause ScheduleWindow (global or per-check) if monitoring is currently paused."""
+        for win in getattr(self.config, "schedule", []) or []:
+            if win.is_active(now):
+                return win
+        if check_id:
+            check = self.checks.get(check_id)
+            if check and hasattr(check, "config"):
+                for win in getattr(check.config, "schedule", []) or []:
+                    if win.is_active(now):
+                        return win
+        return None
+
     def get_check_states(self) -> List[Dict[str, Any]]:
         """Return snapshot of all configured checks and their current state."""
         res = []
         for check_id, check in self.checks.items():
             state = self.states.get(check_id)
+            chk_sched = getattr(check.config, "schedule", []) if hasattr(check, "config") else []
+            active_win = self.get_active_schedule_window(check_id)
             res.append({
                 "id": check_id,
                 "type": check.type,
                 "enabled": getattr(check.config, "enabled", True) if hasattr(check, "config") else True,
                 "params": getattr(check, "params", {}),
+                "schedule": [w.model_dump(exclude_none=True) for w in chk_sched],
+                "is_scheduled_pause": active_win is not None,
+                "active_schedule_window": active_win.format_short() if active_win else None,
                 "status": state.last_status.value if state else "UNKNOWN",
                 "is_muted": state.is_muted if state else False,
                 "muted_until": state.muted_until if state else None,
@@ -183,6 +211,15 @@ class CheckEngine:
                 check_id=check_id,
                 status=CheckStatus.UNKNOWN,
                 summary=f"Check '{check_id}' not found",
+            )
+
+        active_win = self.get_active_schedule_window(check_id)
+        if active_win is not None:
+            self.last_run_at = datetime.now(timezone.utc)
+            return CheckResult(
+                check_id=check_id,
+                status=state.last_status,
+                summary=f"Paused by schedule ({active_win.format_short()})",
             )
 
         try:

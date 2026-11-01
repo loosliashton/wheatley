@@ -176,8 +176,9 @@ class TelegramBot(ChatInterface):
         chunks = split_telegram_message(text)
         results = []
 
-        for chunk in chunks:
+        for idx, chunk in enumerate(chunks):
             html_chunk = markdown_to_telegram_html(chunk)
+            chunk_markup = reply_markup if idx == len(chunks) - 1 else None
             sent = False
 
             # 1. Attempt sending as Telegram HTML
@@ -186,7 +187,7 @@ class TelegramBot(ChatInterface):
                     res = await target.reply_text(
                         html_chunk,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup,
+                        reply_markup=chunk_markup,
                         disable_web_page_preview=True,
                     )
                 else:
@@ -198,7 +199,7 @@ class TelegramBot(ChatInterface):
                         chat_id=cid,
                         text=html_chunk,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup,
+                        reply_markup=chunk_markup,
                         disable_web_page_preview=True,
                     )
                 results.append(res)
@@ -214,7 +215,7 @@ class TelegramBot(ChatInterface):
                         res = await target.reply_text(
                             clean_chunk,
                             parse_mode=None,
-                            reply_markup=reply_markup,
+                            reply_markup=chunk_markup,
                             disable_web_page_preview=True,
                         )
                     else:
@@ -223,7 +224,7 @@ class TelegramBot(ChatInterface):
                             chat_id=cid,
                             text=clean_chunk,
                             parse_mode=None,
-                            reply_markup=reply_markup,
+                            reply_markup=chunk_markup,
                             disable_web_page_preview=True,
                         )
                     results.append(res)
@@ -231,6 +232,34 @@ class TelegramBot(ChatInterface):
                     logger.error("Failed clean plain text send fallback: %s", ex2)
 
         return results
+
+    def _build_continuation_keyboard(
+        self,
+        response: Any = None,
+    ) -> Optional[InlineKeyboardMarkup]:
+        """Build inline keyboard with a Continue button when the agent turn hit the iteration cap."""
+        hit_limit = bool(self.agent and getattr(self.agent, "last_turn_hit_limit", False) is True)
+        if not hit_limit and isinstance(response, str):
+            hit_limit = (
+                "Diagnostic tool budget reached" in response
+                or "Reached maximum function calling iterations" in response
+            )
+        if not hit_limit:
+            return None
+        iterations = 10
+        if self.agent and hasattr(self.agent, "config"):
+            val = getattr(getattr(self.agent.config, "llm", None), "max_tool_iterations", 10)
+            if isinstance(val, int):
+                iterations = val
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"▶️ Continue Investigating (+{iterations})",
+                    callback_data="agent_continue",
+                ),
+            ]
+        ]
+        return InlineKeyboardMarkup(keyboard)
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -467,7 +496,12 @@ class TelegramBot(ChatInterface):
                 issue_summary=f"Manual investigation triggered for {check_id}",
                 chat_id=chat_id,
             )
-        await self._send_or_reply(f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}", target=update.message)
+        keyboard = self._build_continuation_keyboard(diagnosis)
+        await self._send_or_reply(
+            f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
+            target=update.message,
+            reply_markup=keyboard,
+        )
         target_cid = update.effective_chat.id if update.effective_chat else None
         await self._dispatch_agent_proposals(chat_id=target_cid)
 
@@ -594,7 +628,8 @@ class TelegramBot(ChatInterface):
         try:
             async with TypingIndicator(query.message.chat if query.message else None):
                 followup = await self.agent.chat(continuation, chat_id=chat_id)
-            await self._send_or_reply(followup, target=query.message)
+            keyboard = self._build_continuation_keyboard(followup)
+            await self._send_or_reply(followup, target=query.message, reply_markup=keyboard)
             target_cid = query.message.chat_id if query.message else None
             await self._dispatch_agent_proposals(chat_id=target_cid)
             return True
@@ -722,14 +757,37 @@ class TelegramBot(ChatInterface):
                         issue_summary=f"Alert investigation requested for {check_id}",
                         chat_id=chat_id,
                     )
+                keyboard = self._build_continuation_keyboard(diagnosis)
                 await self._send_or_reply(
                     f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
                     target=query.message,
+                    reply_markup=keyboard,
                 )
                 target_cid = query.message.chat_id if query.message else None
                 await self._dispatch_agent_proposals(chat_id=target_cid)
             else:
                 await self._send_or_reply("⚠️ LLM agent is not configured.", target=query.message)
+
+        elif data.startswith("agent_continue"):
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            if not (self.agent and getattr(self.agent, "is_configured", False)):
+                await self._send_or_reply("⚠️ LLM agent is not configured.", target=query.message)
+                return
+
+            chat_target = query.message.chat if query.message else None
+            chat_id_str = str(query.message.chat_id) if query.message else "default"
+            async with TypingIndicator(chat_target):
+                followup = await self.agent.chat(
+                    "Continue the investigation from where you left off.",
+                    chat_id=chat_id_str,
+                )
+            keyboard = self._build_continuation_keyboard(followup)
+            await self._send_or_reply(followup, target=query.message, reply_markup=keyboard)
+            target_cid = query.message.chat_id if query.message else None
+            await self._dispatch_agent_proposals(chat_id=target_cid)
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -745,7 +803,8 @@ class TelegramBot(ChatInterface):
                 chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
                 async with TypingIndicator(update.effective_chat):
                     response = await self.agent.chat(text, chat_id=chat_id)
-                await self._send_or_reply(response, target=update.message)
+                keyboard = self._build_continuation_keyboard(response)
+                await self._send_or_reply(response, target=update.message, reply_markup=keyboard)
                 target_cid = update.effective_chat.id if update.effective_chat else None
                 await self._dispatch_agent_proposals(chat_id=target_cid)
             else:

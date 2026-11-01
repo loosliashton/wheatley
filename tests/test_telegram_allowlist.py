@@ -230,3 +230,56 @@ async def test_proposals_dispatched_after_llm_message(mock_bot):
     assert delivery_order[1][0] == "proposal_card"
     assert "ACTION PROPOSAL REQUIRED" in delivery_order[1][1]
 
+
+@pytest.mark.asyncio
+async def test_agent_continuation_keyboard_and_callbacks(mock_bot):
+    # 1. Test _build_continuation_keyboard
+    mock_agent = MagicMock()
+    mock_agent.is_configured = True
+    mock_agent.config = MagicMock()
+    mock_agent.config.llm.max_tool_iterations = 10
+    mock_agent.last_turn_hit_limit = False
+    mock_bot.agent = mock_agent
+
+    assert mock_bot._build_continuation_keyboard("Plain response") is None
+
+    mock_agent.last_turn_hit_limit = True
+    kb = mock_bot._build_continuation_keyboard("Interim synthesized summary")
+    assert kb is not None
+    assert len(kb.inline_keyboard) == 1
+    assert len(kb.inline_keyboard[0]) == 1
+    assert kb.inline_keyboard[0][0].text == "▶️ Continue Investigating (+10)"
+    assert kb.inline_keyboard[0][0].callback_data == "agent_continue"
+
+    # 2. Test callback query agent_continue (clears button & triggers continuation chat turn)
+    mock_agent.last_turn_hit_limit = False
+    mock_agent.chat = AsyncMock(return_value="Continued analysis complete")
+    mock_agent.drain_pending_proposals = MagicMock(return_value=[])
+
+    mock_bot._send_or_reply = AsyncMock(return_value=[MagicMock()])
+
+    update = MagicMock(spec=Update)
+    query = MagicMock(spec=CallbackQuery)
+    query.data = "agent_continue"
+    query.message = MagicMock(spec=Message)
+    query.message.chat_id = 12345
+    query.message.chat = MagicMock(spec=Chat)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update.callback_query = query
+    update.effective_user = MagicMock(spec=User)
+    update.effective_user.id = 12345
+
+    context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+
+    await mock_bot._handle_callback(update, context)
+
+    query.edit_message_reply_markup.assert_called_once_with(reply_markup=None)
+    mock_agent.chat.assert_called_once_with(
+        "Continue the investigation from where you left off.",
+        chat_id="12345",
+    )
+    mock_bot._send_or_reply.assert_called_once()
+    assert "Continued analysis complete" in mock_bot._send_or_reply.call_args[0][0]
+
+

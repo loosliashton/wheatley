@@ -57,6 +57,7 @@ class LLMAgent:
         self.pending_proposals: List[Any] = []
         self._defer_proposals: bool = False
         self._active_chat_turns: int = 0
+        self.last_turn_hit_limit: bool = False
 
         self.usage = usage if usage is not None else UsageTracker(self.audit)
         self.provider = provider if provider is not None else get_llm_provider(self.config.llm)
@@ -385,6 +386,7 @@ class LLMAgent:
             self.pending_proposals = []
         self._active_chat_turns += 1
         self._defer_proposals = True
+        self.last_turn_hit_limit = False
         try:
             user_content = prompt
             if context_note:
@@ -514,6 +516,7 @@ class LLMAgent:
                 iterations += 1
 
             # Iteration cap reached - synthesize observations gathered so far into a cohesive answer
+            self.last_turn_hit_limit = True
             try:
                 logger.info("Reached maximum iterations (%d); synthesizing observations into final answer", max_iterations)
                 synthesis_instruction = (

@@ -166,10 +166,18 @@ async def test_turn_limit_graceful_synthesis(mock_agent):
     mock_provider.generate_response = AsyncMock(side_effect=mock_generate)
     mock_agent.provider = mock_provider
 
-    answer = await mock_agent.chat("System status overview?")
+    answer = await mock_agent.chat("System status overview?", chat_id="chat-1")
     assert "Synthesized final report" in answer
     assert "Diagnostic tool budget reached; synthesized from gathered observations" in answer
+    assert mock_agent.last_turn_hit_limit is True
     assert call_count == 3  # 2 iteration loop calls + 1 synthesis call
+
+    # SQLite memory immediately has User -> Assistant (summary) for follow-up turns
+    hist = mock_agent.memory.get_history("chat-1", max_turns=10)
+    assert len(hist) == 2
+    assert hist[0].role == "user"
+    assert hist[1].role == "assistant"
+    assert "Synthesized final report" in hist[1].content
 
 
 @pytest.mark.asyncio

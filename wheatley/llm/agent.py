@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+from enum import Enum
 import json
 import logging
 import re
@@ -25,7 +26,48 @@ logger = logging.getLogger("wheatley.llm.agent")
 
 _turn_proposals_var: ContextVar[Optional[List[Any]]] = ContextVar("_turn_proposals_var", default=None)
 
-__all__ = ["LLMAgent", "CommandExecutionHalted"]
+
+class TurnStatus(str, Enum):
+    COMPLETED = "COMPLETED"
+    HALTED_ON_APPROVAL = "HALTED_ON_APPROVAL"
+    HIT_BUDGET = "HIT_BUDGET"
+    ERROR = "ERROR"
+
+
+class ChatTurnResult(str):
+    """Structured result of an LLM agent reasoning turn.
+
+    Subclasses str so it can be passed transparently to text formatters,
+    regexes, string methods, and legacy assertions, while exposing typed
+    metadata (status, proposals, hit_limit, tool_calls_count).
+    """
+
+    status: TurnStatus
+    proposals: List[Any]
+    hit_limit: bool
+    tool_calls_count: int
+
+    def __new__(
+        cls,
+        text: str,
+        status: TurnStatus = TurnStatus.COMPLETED,
+        proposals: Optional[List[Any]] = None,
+        hit_limit: bool = False,
+        tool_calls_count: int = 0,
+    ) -> "ChatTurnResult":
+        obj = super().__new__(cls, text)
+        obj.status = status
+        obj.proposals = list(proposals or [])
+        obj.hit_limit = bool(hit_limit or status == TurnStatus.HIT_BUDGET)
+        obj.tool_calls_count = tool_calls_count
+        return obj
+
+    @property
+    def text(self) -> str:
+        return str(self)
+
+
+__all__ = ["LLMAgent", "CommandExecutionHalted", "TurnStatus", "ChatTurnResult"]
 
 
 class LLMAgent:
@@ -401,15 +443,16 @@ class LLMAgent:
         prompt: str,
         chat_id: str = "default",
         context_note: Optional[str] = None,
-    ) -> str:
+    ) -> ChatTurnResult:
         """Run the multi-turn conversational reasoning loop with SQLite memory persistence."""
         if not self.is_configured:
-            return (
+            return ChatTurnResult(
                 f"⚠️ *LLM Provider '{self.provider_name}' is unconfigured.*\n\n"
                 "To enable conversational reasoning and automated investigations:\n"
                 "1. Update `llm:` in `/etc/wheatley/config.yaml` (provider: gemini, ollama, openai, groq, etc.)\n"
                 "2. Add required API keys to `/etc/wheatley/secrets.env` (e.g. `GEMINI_API_KEY` or `OPENAI_API_KEY`)\n"
-                "3. Restart Wheatley (`systemctl restart wheatley`)"
+                "3. Restart Wheatley (`systemctl restart wheatley`)",
+                status=TurnStatus.ERROR,
             )
 
         turn_proposals: List[Any] = []
@@ -466,7 +509,12 @@ class LLMAgent:
                     )
                 except Exception as e:
                     logger.exception("LLM generation error: %s", e)
-                    return f"❌ *LLM API Error ({self.provider_name}):* `{e}`"
+                    return ChatTurnResult(
+                        f"❌ *LLM API Error ({self.provider_name}):* `{e}`",
+                        status=TurnStatus.ERROR,
+                        proposals=turn_proposals,
+                        tool_calls_count=total_tool_calls,
+                    )
 
                 total_input_tokens += response.input_tokens
                 total_output_tokens += response.output_tokens
@@ -492,7 +540,12 @@ class LLMAgent:
                     )
                     final_text = response.content or "I processed your request, but received an empty text response."
                     self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                    return f"{final_text}{self._format_llm_footer(total_tool_calls)}"
+                    return ChatTurnResult(
+                        f"{final_text}{self._format_llm_footer(total_tool_calls)}",
+                        status=TurnStatus.COMPLETED,
+                        proposals=turn_proposals,
+                        tool_calls_count=total_tool_calls,
+                    )
 
                 total_tool_calls += len(response.tool_calls)
 
@@ -543,7 +596,12 @@ class LLMAgent:
                     )
                     final_text = halted_exception.halt_message
                     self.memory.add_message(chat_id=chat_id, role="assistant", content=final_text)
-                    return f"{final_text}{self._format_llm_footer(total_tool_calls)}"
+                    return ChatTurnResult(
+                        f"{final_text}{self._format_llm_footer(total_tool_calls)}",
+                        status=TurnStatus.HALTED_ON_APPROVAL,
+                        proposals=turn_proposals,
+                        tool_calls_count=total_tool_calls,
+                    )
 
                 iterations += 1
 
@@ -587,7 +645,13 @@ class LLMAgent:
                 else:
                     synthesized_text += "\n\n_Note: Diagnostic tool budget reached; synthesized from gathered observations._"
                 self.memory.add_message(chat_id=chat_id, role="assistant", content=synthesized_text)
-                return f"{synthesized_text}{self._format_llm_footer(total_tool_calls)}"
+                return ChatTurnResult(
+                    f"{synthesized_text}{self._format_llm_footer(total_tool_calls)}",
+                    status=TurnStatus.HIT_BUDGET,
+                    proposals=turn_proposals,
+                    hit_limit=True,
+                    tool_calls_count=total_tool_calls,
+                )
             except Exception as e:
                 logger.exception("Failed during turn limit synthesis: %s", e)
                 self.usage.record_usage(
@@ -598,7 +662,13 @@ class LLMAgent:
                 )
                 limit_msg = f"⚠️ Reached maximum function calling iterations ({max_iterations}). Please narrow your query or approve pending commands."
                 self.memory.add_message(chat_id=chat_id, role="assistant", content=limit_msg)
-                return f"{limit_msg}{self._format_llm_footer(total_tool_calls)}"
+                return ChatTurnResult(
+                    f"{limit_msg}{self._format_llm_footer(total_tool_calls)}",
+                    status=TurnStatus.HIT_BUDGET,
+                    proposals=turn_proposals,
+                    hit_limit=True,
+                    tool_calls_count=total_tool_calls,
+                )
         finally:
             _turn_proposals_var.reset(token)
             self._active_chat_turns = max(0, self._active_chat_turns - 1)
@@ -611,7 +681,7 @@ class LLMAgent:
         issue_summary: str,
         details: Optional[Dict[str, Any]] = None,
         chat_id: str = "default",
-    ) -> str:
+    ) -> ChatTurnResult:
         """Automated alert root-cause diagnosis using the configured LLM."""
         prompt = (
             f"The monitored service '{check_id}' triggered an alert with issue:\n"

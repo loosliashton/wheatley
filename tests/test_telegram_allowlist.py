@@ -232,6 +232,59 @@ async def test_proposals_dispatched_after_llm_message(mock_bot):
 
 
 @pytest.mark.asyncio
+async def test_allowlist_halt_suppresses_redundant_text_message(mock_bot):
+    """Ensure that when a turn halts on an allowlist check, only the proposal card is sent, suppressing the boilerplate text."""
+    delivery_order = []
+
+    async def mock_send_or_reply(text_or_msg, **kwargs):
+        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+            delivery_order.append(("proposal_card", text_or_msg))
+        else:
+            delivery_order.append(("agent_message", text_or_msg))
+        return [MagicMock()]
+
+    mock_bot._send_or_reply = AsyncMock(side_effect=mock_send_or_reply)
+
+    from wheatley.llm.agent import ChatTurnResult, TurnStatus
+
+    prop = mock_bot.approvals.create_proposal(
+        proposal_type="ALLOWLIST_RULE",
+        target="pve-node-01/100",
+        command="docker ps",
+        summary="List docker containers",
+        pattern="docker ps",
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.is_configured = True
+    turn_result = ChatTurnResult(
+        "I need permission to execute `docker ps` on `pve-node-01/100` to proceed with your request. Please choose whether to allow this command using the options below.",
+        status=TurnStatus.HALTED_ON_APPROVAL,
+        proposals=[prop],
+    )
+    mock_agent.chat = AsyncMock(return_value=turn_result)
+    mock_bot.agent = mock_agent
+
+    update = MagicMock(spec=Update)
+    update.message = MagicMock(spec=Message)
+    update.message.text = "Show me the running docker containers"
+    update.effective_user = MagicMock(spec=User)
+    update.effective_user.id = 12345
+    update.effective_chat = MagicMock(spec=Chat)
+    update.effective_chat.id = 12345
+
+    context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+
+    await mock_bot._handle_text(update, context)
+
+    # Verify only the proposal card was sent to Telegram (no separate "I need permission" message)
+    assert len(delivery_order) == 1
+    assert delivery_order[0][0] == "proposal_card"
+    assert "COMMAND ALLOWLIST PROPOSAL" in delivery_order[0][1]
+    assert "docker ps" in delivery_order[0][1]
+
+
+@pytest.mark.asyncio
 async def test_agent_continuation_keyboard_and_callbacks(mock_bot):
     # 1. Test _build_continuation_keyboard
     mock_agent = MagicMock()
@@ -242,6 +295,20 @@ async def test_agent_continuation_keyboard_and_callbacks(mock_bot):
     mock_bot.agent = mock_agent
 
     assert mock_bot._build_continuation_keyboard("Plain response") is None
+
+    # A completed ChatTurnResult mentioning budget text should NOT falsely trigger the button
+    from wheatley.llm.agent import ChatTurnResult, TurnStatus
+    completed_turn = ChatTurnResult(
+        "Earlier you saw 'Diagnostic tool budget reached', which means the cap was hit.",
+        status=TurnStatus.COMPLETED,
+    )
+    assert completed_turn.hit_limit is False
+    assert mock_bot._build_continuation_keyboard(completed_turn) is None
+
+    # A HIT_BUDGET ChatTurnResult automatically sets hit_limit=True and triggers the button
+    budget_turn = ChatTurnResult("Interim summary", status=TurnStatus.HIT_BUDGET)
+    assert budget_turn.hit_limit is True
+    assert mock_bot._build_continuation_keyboard(budget_turn) is not None
 
     mock_agent.last_turn_hit_limit = True
     kb = mock_bot._build_continuation_keyboard("Interim synthesized summary")

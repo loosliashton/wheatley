@@ -8,7 +8,7 @@ import pytest
 from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import LLMConfig, WheatleyConfig
-from wheatley.llm.agent import LLMAgent
+from wheatley.llm.agent import ChatTurnResult, LLMAgent, TurnStatus
 from wheatley.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, ToolCall, ToolDefinition
 from wheatley.llm.providers import get_llm_provider
 from wheatley.llm.providers.gemini import GeminiProvider
@@ -758,10 +758,37 @@ async def test_config_update_proposal_supersedes_earlier_draft_in_turn(test_env,
     res = await agent.chat("Remove 110 from monitoring", chat_id="supersede_test")
 
     assert "Created proposal" in res
+    assert res.status == TurnStatus.COMPLETED
+    assert len(res.proposals) == 1
     drained = agent.drain_pending_proposals()
     assert len(drained) == 1
     assert drained[0].summary == "Exclude cave/110"
     assert "+    - cave/110" in drained[0].command
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_result_structure(test_env):
+    from wheatley.llm.agent import ChatTurnResult, TurnStatus
+
+    cfg, audit, usage, clients, check_engine = test_env
+    mock_provider = MagicMock(spec=BaseLLMProvider)
+    mock_provider.name = "mock"
+    mock_provider.model_name = "mock-model"
+    mock_provider.model = "mock-model"
+    mock_provider.generate_response = AsyncMock(
+        return_value=LLMResponse(content="System healthy.", tool_calls=[])
+    )
+
+    agent = LLMAgent(cfg, audit, provider=mock_provider, usage=usage, check_engine=check_engine)
+    result = await agent.chat("Status?")
+
+    assert isinstance(result, ChatTurnResult)
+    assert isinstance(result, str)
+    assert result.status == TurnStatus.COMPLETED
+    assert "System healthy" in result
+    assert result.text.startswith("System healthy")
+    assert result.hit_limit is False
+    assert result.proposals == []
 
 
 

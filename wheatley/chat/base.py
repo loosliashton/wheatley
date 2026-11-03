@@ -36,6 +36,7 @@ class ChatInterface(ABC):
         pattern: Optional[str] = None,
         justification: Optional[str] = None,
         chat_id: Optional[int] = None,
+        target_message: Optional[Any] = None,
     ) -> Any:
         """Send an interactive action or allowlist proposal with buttons."""
         pass

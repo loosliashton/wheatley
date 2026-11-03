@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple, Union
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -27,6 +28,7 @@ from wheatley.chat.formatter import (
     strip_html_tags,
 )
 from wheatley.config import TelegramConfig
+from wheatley.llm.agent import ChatTurnResult, TurnStatus
 from wheatley.orchestrator import ProposalOrchestrator
 from wheatley.tools.shell import ShellExecutor
 
@@ -162,6 +164,80 @@ class TelegramBot(ChatInterface):
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
 
+    async def _dispatch_send_chunk(
+        self,
+        html_chunk: str,
+        target: Any = None,
+        chat_id: Optional[int] = None,
+        reply_markup: Optional[Any] = None,
+    ) -> Optional[Any]:
+        """Dispatch a single text chunk with HTML formatting, falling back to stripped plain text."""
+        cid = chat_id or self.primary_chat_id
+        if target is None and cid is None:
+            logger.warning("Cannot send message: primary_chat_id is unset.")
+            return None
+
+        for payload, mode in ((html_chunk, ParseMode.HTML), (strip_html_tags(html_chunk), None)):
+            try:
+                if target is not None:
+                    return await target.reply_text(
+                        payload,
+                        parse_mode=mode,
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=True,
+                    )
+                return await self.app.bot.send_message(
+                    chat_id=cid,
+                    text=payload,
+                    parse_mode=mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                if mode == ParseMode.HTML:
+                    logger.warning("Telegram HTML send failed (%s), falling back to clean text", e)
+                else:
+                    logger.error("Failed clean plain text send fallback: %s", e)
+        return None
+
+    async def _dispatch_edit_chunk(
+        self,
+        message: Any,
+        html_chunk: str,
+        reply_markup: Optional[Any] = None,
+    ) -> Tuple[bool, Optional[Any]]:
+        """Attempt to edit message text with HTML; fallback to plain text or reply_markup update.
+
+        Returns (success: bool, result: Optional[Any]).
+        """
+        for payload, mode in ((html_chunk, ParseMode.HTML), (strip_html_tags(html_chunk), None)):
+            try:
+                res = message.edit_text(
+                    payload,
+                    parse_mode=mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+                if inspect.isawaitable(res):
+                    res = await res
+                return True, res or message
+            except Exception as e:
+                if "message is not modified" in str(e).lower():
+                    if hasattr(message, "edit_reply_markup"):
+                        try:
+                            rm = message.edit_reply_markup(reply_markup=reply_markup)
+                            if inspect.isawaitable(rm):
+                                await rm
+                        except Exception:
+                            pass
+                    return True, message
+                if mode == ParseMode.HTML:
+                    logger.debug("Telegram HTML edit failed (%s), attempting clean text fallback", e)
+                else:
+                    logger.warning("Telegram edit fallback failed (%s); sending new message", e)
+
+        return False, None
+
     async def _send_or_reply(
         self,
         text: str,
@@ -175,75 +251,81 @@ class TelegramBot(ChatInterface):
 
         chunks = split_telegram_message(text)
         results = []
-
         for idx, chunk in enumerate(chunks):
-            html_chunk = markdown_to_telegram_html(chunk)
             chunk_markup = reply_markup if idx == len(chunks) - 1 else None
-            sent = False
-
-            # 1. Attempt sending as Telegram HTML
-            try:
-                if target is not None:
-                    res = await target.reply_text(
-                        html_chunk,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=chunk_markup,
-                        disable_web_page_preview=True,
-                    )
-                else:
-                    cid = chat_id or self.primary_chat_id
-                    if cid is None:
-                        logger.warning("Cannot send message: primary_chat_id is unset.")
-                        return results
-                    res = await self.app.bot.send_message(
-                        chat_id=cid,
-                        text=html_chunk,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=chunk_markup,
-                        disable_web_page_preview=True,
-                    )
+            html_chunk = markdown_to_telegram_html(chunk)
+            res = await self._dispatch_send_chunk(
+                html_chunk=html_chunk,
+                target=target,
+                chat_id=chat_id,
+                reply_markup=chunk_markup,
+            )
+            if res is not None:
                 results.append(res)
-                sent = True
-            except Exception as e:
-                logger.warning("Telegram HTML send failed (%s), falling back to clean text", e)
+        return results
 
-            # 2. Fallback to clean plain text (HTML tags stripped)
-            if not sent:
-                clean_chunk = strip_html_tags(html_chunk)
-                try:
-                    if target is not None:
-                        res = await target.reply_text(
-                            clean_chunk,
-                            parse_mode=None,
-                            reply_markup=chunk_markup,
-                            disable_web_page_preview=True,
-                        )
-                    else:
-                        cid = chat_id or self.primary_chat_id
-                        res = await self.app.bot.send_message(
-                            chat_id=cid,
-                            text=clean_chunk,
-                            parse_mode=None,
-                            reply_markup=chunk_markup,
-                            disable_web_page_preview=True,
-                        )
-                    results.append(res)
-                except Exception as ex2:
-                    logger.error("Failed clean plain text send fallback: %s", ex2)
+    async def _edit_or_send(
+        self,
+        text: str,
+        message: Optional[Any] = None,
+        chat_id: Optional[int] = None,
+        reply_markup: Optional[Any] = None,
+    ) -> List[Any]:
+        """Edit an existing Telegram message in place if possible, falling back to sending a new message.
+
+        If text exceeds Telegram's single-message limit (4096 chars), the first chunk
+        is edited into the existing message and subsequent chunks are sent as follow-ups.
+        """
+        if not text:
+            return []
+
+        chunks = split_telegram_message(text)
+        if not chunks:
+            return []
+
+        # If no message provided or message doesn't support edit_text, fall back to _send_or_reply
+        if message is None or not hasattr(message, "edit_text"):
+            return await self._send_or_reply(text, target=message, chat_id=chat_id, reply_markup=reply_markup)
+
+        first_chunk = chunks[0]
+        html_chunk = markdown_to_telegram_html(first_chunk)
+        chunk_markup = reply_markup if len(chunks) == 1 else None
+
+        edited, res = await self._dispatch_edit_chunk(message, html_chunk, reply_markup=chunk_markup)
+        if not edited:
+            return await self._send_or_reply(text, target=message, chat_id=chat_id, reply_markup=reply_markup)
+
+        results: List[Any] = [res]
+        if len(chunks) > 1:
+            for idx in range(1, len(chunks)):
+                sub_markup = reply_markup if idx == len(chunks) - 1 else None
+                sub_res = await self._send_or_reply(
+                    chunks[idx],
+                    target=message,
+                    chat_id=chat_id,
+                    reply_markup=sub_markup,
+                )
+                results.extend(sub_res)
 
         return results
 
     def _build_continuation_keyboard(
         self,
         response: Any = None,
+        hit_limit: Optional[bool] = None,
     ) -> Optional[InlineKeyboardMarkup]:
         """Build inline keyboard with a Continue button when the agent turn hit the iteration cap."""
-        hit_limit = bool(self.agent and getattr(self.agent, "last_turn_hit_limit", False) is True)
-        if not hit_limit and isinstance(response, str):
-            hit_limit = (
-                "Diagnostic tool budget reached" in response
-                or "Reached maximum function calling iterations" in response
-            )
+        if hit_limit is None:
+            hit_limit = getattr(response, "hit_limit", None)
+        if hit_limit is None and getattr(response, "status", None) is not None:
+            hit_limit = response.status == TurnStatus.HIT_BUDGET
+        if hit_limit is None:
+            hit_limit = bool(self.agent and getattr(self.agent, "last_turn_hit_limit", False) is True)
+            if not hit_limit and isinstance(response, str):
+                hit_limit = (
+                    "Diagnostic tool budget reached" in response
+                    or "Reached maximum function calling iterations" in response
+                )
         if not hit_limit:
             return None
         iterations = 10
@@ -316,21 +398,22 @@ class TelegramBot(ChatInterface):
         if not self._is_authorized(update):
             return
         self.audit.log_event("CMD", f"tg:{update.effective_user.id}", "/discover", "SUCCESS")
-        await self._send_or_reply(
+        placeholders = await self._send_or_reply(
             "⚙️ [SYSTEM] *Scanning Proxmox nodes and probing guests for services...*\n_This may take a few seconds._",
             target=update.message,
         )
+        placeholder = placeholders[0] if placeholders else update.message
         if self.discovery_provider:
             try:
                 async with TypingIndicator(update.effective_chat):
                     summary = await self.discovery_provider()
                 summary_clean = summary.lstrip("🔍 ")
-                await self._send_or_reply(f"⚙️ [SYSTEM] {summary_clean}", target=update.message)
+                await self._edit_or_send(f"⚙️ [SYSTEM] {summary_clean}", message=placeholder)
             except Exception as e:
                 logger.exception("Telegram /discover failed")
-                await self._send_or_reply(f"⚙️ [SYSTEM] *Discovery failed:* `{e}`", target=update.message)
+                await self._edit_or_send(f"⚙️ [SYSTEM] *Discovery failed:* `{e}`", message=placeholder)
         else:
-            await self._send_or_reply("⚙️ [SYSTEM] Auto-discovery provider not connected to bot.", target=update.message)
+            await self._edit_or_send("⚙️ [SYSTEM] Auto-discovery provider not connected to bot.", message=placeholder)
 
     async def _cmd_audit(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -493,6 +576,49 @@ class TelegramBot(ChatInterface):
         else:
             await self._send_or_reply("⚙️ [SYSTEM] Conversation reset.", target=update.message)
 
+    async def _run_investigation(
+        self,
+        check_id: str,
+        target_message: Any,
+        chat: Optional[Any] = None,
+        chat_id_str: Optional[str] = None,
+        issue_summary: Optional[str] = None,
+        initial_notice: Optional[str] = None,
+    ) -> None:
+        if not self.agent or not self.agent.is_configured:
+            await self._send_or_reply("⚙️ [SYSTEM] LLM is not configured.", target=target_message)
+            return
+
+        model_name = getattr(self.agent, "model_name", "LLM")
+        cid_str = chat_id_str or (str(chat.id) if chat else "default")
+        notice = initial_notice or f"⚙️ [SYSTEM] *Investigating `{check_id}` with {model_name}...*"
+        placeholders = await self._send_or_reply(notice, target=target_message)
+        placeholder = placeholders[0] if placeholders else target_message
+
+        async with TypingIndicator(chat):
+            diagnosis = await self.agent.investigate_alert(
+                check_id=check_id,
+                issue_summary=issue_summary or f"Manual investigation triggered for {check_id}",
+                chat_id=cid_str,
+            )
+        target_cid = chat.id if chat else None
+        if getattr(diagnosis, "status", None) == TurnStatus.HALTED_ON_APPROVAL:
+            await self._edit_or_send(
+                f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n_Diagnostic command requires authorization below._",
+                message=placeholder,
+            )
+            await self._dispatch_agent_proposals(turn=diagnosis, chat_id=target_cid)
+            return
+
+        keyboard = self._build_continuation_keyboard(diagnosis)
+        text = getattr(diagnosis, "text", str(diagnosis))
+        await self._edit_or_send(
+            f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{text}",
+            message=placeholder,
+            reply_markup=keyboard,
+        )
+        await self._dispatch_agent_proposals(turn=diagnosis, chat_id=target_cid)
+
     async def _cmd_investigate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
@@ -502,30 +628,12 @@ class TelegramBot(ChatInterface):
             return
 
         check_id = args[0]
-        if not self.agent or not self.agent.is_configured:
-            await self._send_or_reply("⚙️ [SYSTEM] LLM is not configured.", target=update.message)
-            return
-
-        model_name = getattr(self.agent, "model_name", "LLM")
-        chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
-        await self._send_or_reply(
-            f"⚙️ [SYSTEM] *Investigating `{check_id}` with {model_name}...*",
-            target=update.message,
+        await self._run_investigation(
+            check_id=check_id,
+            target_message=update.message,
+            chat=update.effective_chat,
+            issue_summary=f"Manual investigation triggered for {check_id}",
         )
-        async with TypingIndicator(update.effective_chat):
-            diagnosis = await self.agent.investigate_alert(
-                check_id=check_id,
-                issue_summary=f"Manual investigation triggered for {check_id}",
-                chat_id=chat_id,
-            )
-        keyboard = self._build_continuation_keyboard(diagnosis)
-        await self._send_or_reply(
-            f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
-            target=update.message,
-            reply_markup=keyboard,
-        )
-        target_cid = update.effective_chat.id if update.effective_chat else None
-        await self._dispatch_agent_proposals(chat_id=target_cid)
 
     async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -594,19 +702,18 @@ class TelegramBot(ChatInterface):
                 commits_summary += f"\n• _... and {len(check_res.incoming_commits) - 8} more_"
 
             summary = f"Update Wheatley to {check_res.remote_commit} ({len(check_res.incoming_commits)} new commits)"
+            details = (
+                f"• Current: `{check_res.current_commit}`\n"
+                f"• Latest: `{check_res.remote_commit}` on `{check_res.branch}`\n\n"
+                f"*Incoming Commits:*\n{commits_summary}"
+            )
             prop = self.approvals.create_proposal(
                 proposal_type="SELF_UPDATE",
                 target="localhost",
                 command="wheatley update",
                 summary=summary,
                 risk="MEDIUM",
-            )
-            await self._send_or_reply(
-                f"⚙️ [SYSTEM] *Update Available for Wheatley!*\n\n"
-                f"• Current: `{check_res.current_commit}`\n"
-                f"• Latest: `{check_res.remote_commit}` on `{check_res.branch}`\n\n"
-                f"*New Commits:*\n{commits_summary}",
-                target=update.message,
+                justification=details,
             )
             await self.send_proposal(
                 proposal_id=prop.id,
@@ -615,6 +722,7 @@ class TelegramBot(ChatInterface):
                 target=prop.target,
                 risk=prop.risk,
                 proposal_type=prop.proposal_type,
+                justification=details,
                 chat_id=update.effective_chat.id if update.effective_chat else None,
             )
 
@@ -650,14 +758,66 @@ class TelegramBot(ChatInterface):
         try:
             async with TypingIndicator(query.message.chat if query.message else None):
                 followup = await self.agent.chat(continuation, chat_id=chat_id)
-            keyboard = self._build_continuation_keyboard(followup)
-            await self._send_or_reply(followup, target=query.message, reply_markup=keyboard)
             target_cid = query.message.chat_id if query.message else None
-            await self._dispatch_agent_proposals(chat_id=target_cid)
+            await self._deliver_agent_turn(followup, target_message=query.message, chat_id=target_cid)
             return True
         except Exception as e:
             logger.exception("Agent failed to synthesize proposal continuation: %s", e)
             return False
+
+    @staticmethod
+    async def _clear_reply_markup(query: Any) -> None:
+        """Safely strip inline keyboard buttons from a callback query message."""
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    async def _update_proposal_card(
+        self,
+        message: Any,
+        prop: Any,
+        status_line: str,
+        reply_markup: Optional[Any] = None,
+    ) -> List[Any]:
+        """Format and update a proposal card in place with a new status footer."""
+        if not prop:
+            return []
+        card = self._format_proposal_content(
+            proposal_type=prop.proposal_type,
+            target=prop.target,
+            command=prop.command,
+            summary=prop.summary,
+            risk=prop.risk,
+            pattern=prop.pattern,
+            justification=getattr(prop, "justification", None),
+            status_line=status_line,
+        )
+        return await self._edit_or_send(card, message=message, reply_markup=reply_markup)
+
+    async def _execute_and_resolve_proposal(
+        self,
+        query: Any,
+        prop: Any,
+        decision: str,
+        exec_status: str,
+        done_status: str,
+    ) -> None:
+        """Shared execution lifecycle: updates card to executing, executes command, records result, updates card to done, and resumes agent."""
+        if prop:
+            await self._update_proposal_card(query.message, prop, exec_status)
+        else:
+            await self._clear_reply_markup(query)
+
+        async with TypingIndicator(query.message.chat if query.message else None):
+            res = await self._execute_proposal_command(prop)
+        if prop:
+            self.approvals.record_execution(prop.id, res[:500])
+            await self._update_proposal_card(query.message, prop, done_status)
+
+        agent_resumed = await self._resume_agent_after_proposal(query, prop, decision, res)
+        if not agent_resumed:
+            await self._send_or_reply(res, target=query.message)
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -675,64 +835,70 @@ class TelegramBot(ChatInterface):
             proposal_id = data.split(":", 1)[1]
             success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ONCE", user_id)
             if not success:
-                await query.edit_message_reply_markup(reply_markup=None)
+                await self._clear_reply_markup(query)
                 await self._send_or_reply(f"⚙️ [SYSTEM] *Could not execute:* {msg}", target=query.message)
                 return
 
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("ALLOWLIST", f"tg:{user_id}", f"allow_once:{proposal_id}", "APPROVED", details={"cmd": prop.command if prop else ""})
-            await query.edit_message_reply_markup(reply_markup=None)
-            await self._send_or_reply(f"⚙️ [SYSTEM] *Executing once on `{prop.target if prop else 'target'}`...*", target=query.message)
-            async with TypingIndicator(query.message.chat if query.message else None):
-                res = await self._execute_proposal_command(prop)
-            self.approvals.record_execution(proposal_id, res[:500])
+            target_str = prop.target if prop else "target"
 
-            agent_resumed = await self._resume_agent_after_proposal(query, prop, "ALLOW_ONCE", res)
-            if not agent_resumed:
-                await self._send_or_reply(res, target=query.message)
+            await self._execute_and_resolve_proposal(
+                query=query,
+                prop=prop,
+                decision="ALLOW_ONCE",
+                exec_status=f"⏳ *Status:* Executing once on `{target_str}`...",
+                done_status=f"⚡ *Status:* Approved (Run Once) — Executed on `{target_str}`",
+            )
 
         elif data.startswith("allow_always:"):
             proposal_id = data.split(":", 1)[1]
             success, msg = self.approvals.resolve_proposal(proposal_id, "ALLOW_ALWAYS", user_id)
             if not success:
-                await query.edit_message_reply_markup(reply_markup=None)
+                await self._clear_reply_markup(query)
                 await self._send_or_reply(f"⚙️ [SYSTEM] *Could not save rule:* {msg}", target=query.message)
                 return
 
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("ALLOWLIST", f"tg:{user_id}", f"allow_always:{proposal_id}", "ADDED", details={"pattern": prop.pattern if prop else "", "target": prop.target if prop else ""})
-            await query.edit_message_reply_markup(reply_markup=None)
-            target_str = prop.target if prop else "target"
             pattern_str = prop.pattern if prop else "rule"
-            await self._send_or_reply(f"⚙️ [SYSTEM] *Added rule `{pattern_str}` to allowlist for `{target_str}`.*\nExecuting command now...", target=query.message)
-            async with TypingIndicator(query.message.chat if query.message else None):
-                res = await self._execute_proposal_command(prop)
-            self.approvals.record_execution(proposal_id, res[:500])
 
-            agent_resumed = await self._resume_agent_after_proposal(query, prop, "ALLOW_ALWAYS", res)
-            if not agent_resumed:
-                await self._send_or_reply(res, target=query.message)
+            await self._execute_and_resolve_proposal(
+                query=query,
+                prop=prop,
+                decision="ALLOW_ALWAYS",
+                exec_status=f"⏳ *Status:* Adding rule `{pattern_str}` & executing...",
+                done_status=f"🛡 *Status:* Always Allowed — Added rule `{pattern_str}` & executed",
+            )
 
         elif data.startswith("approve:"):
             proposal_id = data.split(":", 1)[1]
             success, msg = self.approvals.resolve_proposal(proposal_id, "APPROVE", user_id)
             if not success:
-                await query.edit_message_reply_markup(reply_markup=None)
+                await self._clear_reply_markup(query)
                 await self._send_or_reply(f"❌ *Approval failed:* {msg}", target=query.message)
                 return
 
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"approve:{proposal_id}", "APPROVED")
-            await query.edit_message_reply_markup(reply_markup=None)
-            await self._send_or_reply(f"⚙️ [SYSTEM] *Proposal {proposal_id} approved.* Executing...", target=query.message)
-            if prop:
-                async with TypingIndicator(query.message.chat if query.message else None):
-                    res = await self._execute_proposal_command(prop)
-                self.approvals.record_execution(proposal_id, res[:500])
 
-                agent_resumed = await self._resume_agent_after_proposal(query, prop, "APPROVE", res)
-                if not agent_resumed:
-                    await self._send_or_reply(res, target=query.message)
+            if prop:
+                if prop.proposal_type == "CONFIG_UPDATE":
+                    final_status = "✅ *Status:* Approved — Config update applied & checks reloaded"
+                elif prop.proposal_type == "SELF_UPDATE":
+                    final_status = "🚀 *Status:* Approved — Update triggered"
+                else:
+                    final_status = "✅ *Status:* Approved & Executed"
+
+                await self._execute_and_resolve_proposal(
+                    query=query,
+                    prop=prop,
+                    decision="APPROVE",
+                    exec_status="⏳ *Status:* Approved — Executing...",
+                    done_status=final_status,
+                )
+            else:
+                await self._clear_reply_markup(query)
 
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, True, user_id)
@@ -742,9 +908,12 @@ class TelegramBot(ChatInterface):
             self.approvals.resolve_proposal(proposal_id, "DENY", user_id)
             prop = self.approvals.get_proposal(proposal_id)
             self.audit.log_event("PROPOSAL", f"tg:{user_id}", f"deny:{proposal_id}", "DENIED")
-            await query.edit_message_reply_markup(reply_markup=None)
-            cmd_name = prop.command if prop else f"Proposal {proposal_id}"
-            await self._send_or_reply(f"⚙️ [SYSTEM] *Denied permission for `{cmd_name}`.*", target=query.message)
+
+            if prop:
+                await self._update_proposal_card(query.message, prop, "❌ *Status:* Denied by user")
+            else:
+                await self._clear_reply_markup(query)
+
             if self.proposal_callback:
                 await self.proposal_callback(proposal_id, False, user_id)
 
@@ -757,44 +926,33 @@ class TelegramBot(ChatInterface):
             if self.check_engine:
                 until = self.check_engine.mute_check(check_id, minutes)
                 until_str = until.strftime("%H:%M UTC") if until else f"{minutes}m"
-                await query.edit_message_reply_markup(reply_markup=None)
-                await self._send_or_reply(
-                    f"🔔 [MONITOR] 🔕 *Muted check* `{check_id}` for {minutes}m (until `{until_str}`).",
-                    target=query.message,
+                alert_text = getattr(query.message, "text", "") or getattr(query.message, "caption", "") or ""
+                base_text = alert_text.split("\n\n🔕 *Muted")[0]
+                updated_text = f"{base_text}\n\n🔕 *Muted for {minutes}m (until {until_str})*"
+                keep_keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔍 Investigate", callback_data=f"investigate:{check_id}")]]
+                )
+                await self._edit_or_send(
+                    updated_text,
+                    message=query.message,
+                    reply_markup=keep_keyboard,
                 )
 
         elif data.startswith("investigate:"):
             check_id = data.split(":", 1)[1]
-            if self.agent and self.agent.is_configured:
-                model_name = getattr(self.agent, "model_name", "LLM")
-                chat_id = str(query.message.chat_id) if query.message else "default"
-                self.audit.log_event("AI", f"tg:{user_id}", f"investigate:{check_id}", "TRIGGERED")
-                await self._send_or_reply(
-                    f"⚙️ [SYSTEM] *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
-                    target=query.message,
-                )
-                async with TypingIndicator(query.message.chat if query.message else None):
-                    diagnosis = await self.agent.investigate_alert(
-                        check_id=check_id,
-                        issue_summary=f"Alert investigation requested for {check_id}",
-                        chat_id=chat_id,
-                    )
-                keyboard = self._build_continuation_keyboard(diagnosis)
-                await self._send_or_reply(
-                    f"🤖 *Wheatley Diagnosis ({check_id}):*\n\n{diagnosis}",
-                    target=query.message,
-                    reply_markup=keyboard,
-                )
-                target_cid = query.message.chat_id if query.message else None
-                await self._dispatch_agent_proposals(chat_id=target_cid)
-            else:
-                await self._send_or_reply("⚠️ LLM agent is not configured.", target=query.message)
+            self.audit.log_event("AI", f"tg:{user_id}", f"investigate:{check_id}", "TRIGGERED")
+            model_name = getattr(self.agent, "model_name", "LLM") if self.agent else "LLM"
+            await self._run_investigation(
+                check_id=check_id,
+                target_message=query.message,
+                chat=query.message.chat if query.message else None,
+                chat_id_str=str(query.message.chat_id) if query.message else "default",
+                issue_summary=f"Alert investigation requested for {check_id}",
+                initial_notice=f"⚙️ [SYSTEM] *Wheatley is investigating `{check_id}` with {model_name}...*\n_Analyzing live telemetry and check state._",
+            )
 
         elif data.startswith("agent_continue"):
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            await self._clear_reply_markup(query)
             if not (self.agent and getattr(self.agent, "is_configured", False)):
                 await self._send_or_reply("⚠️ LLM agent is not configured.", target=query.message)
                 return
@@ -806,10 +964,34 @@ class TelegramBot(ChatInterface):
                     "Continue the investigation from where you left off.",
                     chat_id=chat_id_str,
                 )
-            keyboard = self._build_continuation_keyboard(followup)
-            await self._send_or_reply(followup, target=query.message, reply_markup=keyboard)
             target_cid = query.message.chat_id if query.message else None
-            await self._dispatch_agent_proposals(chat_id=target_cid)
+            await self._deliver_agent_turn(
+                turn=followup,
+                target_message=query.message,
+                chat_id=target_cid,
+            )
+
+    async def _deliver_agent_turn(
+        self,
+        turn: Union[ChatTurnResult, str],
+        target_message: Any = None,
+        chat_id: Optional[int] = None,
+    ) -> None:
+        """Deliver agent response and proposals, omitting redundant allowlist boilerplate text in chat."""
+        if getattr(turn, "status", None) == TurnStatus.HALTED_ON_APPROVAL:
+            proposals = await self._dispatch_agent_proposals(
+                turn=turn, chat_id=chat_id, target_message=target_message
+            )
+            if proposals:
+                return
+
+        keyboard = self._build_continuation_keyboard(turn)
+        text = getattr(turn, "text", str(turn))
+        await self._send_or_reply(
+            text, target=target_message, chat_id=chat_id, reply_markup=keyboard
+        )
+        if getattr(turn, "status", None) != TurnStatus.HALTED_ON_APPROVAL:
+            await self._dispatch_agent_proposals(turn=turn, chat_id=chat_id)
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -825,10 +1007,12 @@ class TelegramBot(ChatInterface):
                 chat_id = str(update.effective_chat.id) if update.effective_chat else "default"
                 async with TypingIndicator(update.effective_chat):
                     response = await self.agent.chat(text, chat_id=chat_id)
-                keyboard = self._build_continuation_keyboard(response)
-                await self._send_or_reply(response, target=update.message, reply_markup=keyboard)
                 target_cid = update.effective_chat.id if update.effective_chat else None
-                await self._dispatch_agent_proposals(chat_id=target_cid)
+                await self._deliver_agent_turn(
+                    turn=response,
+                    target_message=update.message,
+                    chat_id=target_cid,
+                )
             else:
                 await self._send_or_reply(
                     f"Received: \"{text}\"\n\n"
@@ -864,6 +1048,64 @@ class TelegramBot(ChatInterface):
         res = await self._send_or_reply(text, chat_id=self.primary_chat_id)
         return res[0] if res else None
 
+    @staticmethod
+    def _format_proposal_content(
+        proposal_type: str,
+        target: str,
+        command: str,
+        summary: str,
+        risk: str,
+        pattern: Optional[str] = None,
+        justification: Optional[str] = None,
+        status_line: Optional[str] = None,
+    ) -> str:
+        if proposal_type == "ALLOWLIST_RULE":
+            justification_line = f"*Justification:* {justification}\n" if justification else ""
+            footer = status_line or "Select an option to proceed:"
+            return (
+                f"⚙️ [SYSTEM] *COMMAND ALLOWLIST PROPOSAL*\n\n"
+                f"*Target:* `{target}`\n"
+                f"*Command to execute:*\n```bash\n{command}\n```\n"
+                f"*Suggested Rule:* `{pattern or command}`\n"
+                f"*Summary:* {summary}\n"
+                f"{justification_line}\n"
+                f"{footer}"
+            )
+        elif proposal_type == "CONFIG_UPDATE":
+            diff_text = command
+            try:
+                data = json.loads(command)
+                diff_text = data.get("diff", command)
+            except Exception:
+                pass
+            footer = status_line or "Tap Approve Update to apply changes and reload the check engine, or Deny to cancel."
+            return (
+                f"⚙️ [SYSTEM] *CHECK CONFIG UPDATE PROPOSAL*\n\n"
+                f"*File:* `{target}`\n"
+                f"*Summary:* {summary}\n\n"
+                f"*Proposed Diff:*\n```diff\n{diff_text}\n```\n"
+                f"{footer}"
+            )
+        elif proposal_type == "SELF_UPDATE":
+            commits_block = f"\n\n*New Commits:*\n{justification}\n" if justification else "\n\n*Action:* Pull latest commits, update packages, and reload Wheatley\n"
+            footer = status_line or "Tap Update Now to proceed or Cancel."
+            return (
+                f"⚙️ [SYSTEM] *WHEATLEY UPDATE PROPOSAL*\n\n"
+                f"*Summary:* {summary}\n"
+                f"{commits_block}\n"
+                f"{footer}"
+            )
+        else:
+            footer = status_line or "Tap Approve to execute, or Deny to reject."
+            return (
+                f"⚙️ [SYSTEM] *ACTION PROPOSAL REQUIRED*\n\n"
+                f"*Target:* `{target}`\n"
+                f"*Risk Level:* `{risk}`\n"
+                f"*Summary:* {summary}\n\n"
+                f"*Command to execute:*\n```bash\n{command}\n```\n\n"
+                f"{footer}"
+            )
+
     async def send_proposal(
         self,
         proposal_id: str,
@@ -875,9 +1117,10 @@ class TelegramBot(ChatInterface):
         pattern: Optional[str] = None,
         justification: Optional[str] = None,
         chat_id: Optional[int] = None,
+        target_message: Optional[Any] = None,
     ) -> Any:
         cid = chat_id or self.primary_chat_id
-        if not cid:
+        if not cid and not target_message:
             return None
 
         if proposal_type == "ALLOWLIST_RULE":
@@ -892,16 +1135,6 @@ class TelegramBot(ChatInterface):
                     ],
                 ]
             )
-            justification_line = f"*Justification:* {justification}\n" if justification else ""
-            msg = (
-                f"⚙️ [SYSTEM] *COMMAND ALLOWLIST PROPOSAL*\n\n"
-                f"*Target:* `{target}`\n"
-                f"*Command to execute:*\n```bash\n{command}\n```\n"
-                f"*Suggested Rule:* `{pattern or command}`\n"
-                f"*Summary:* {summary}\n"
-                f"{justification_line}\n"
-                f"Select an option to proceed:"
-            )
         elif proposal_type == "CONFIG_UPDATE":
             keyboard = InlineKeyboardMarkup(
                 [
@@ -910,19 +1143,6 @@ class TelegramBot(ChatInterface):
                         InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
                     ]
                 ]
-            )
-            diff_text = command
-            try:
-                data = json.loads(command)
-                diff_text = data.get("diff", command)
-            except Exception:
-                pass
-            msg = (
-                f"⚙️ [SYSTEM] *CHECK CONFIG UPDATE PROPOSAL*\n\n"
-                f"*File:* `{target}`\n"
-                f"*Summary:* {summary}\n\n"
-                f"*Proposed Diff:*\n```diff\n{diff_text}\n```\n"
-                f"Tap Approve Update to apply changes and reload the check engine, or Deny to cancel."
             )
         elif proposal_type == "SELF_UPDATE":
             keyboard = InlineKeyboardMarkup(
@@ -933,12 +1153,6 @@ class TelegramBot(ChatInterface):
                     ]
                 ]
             )
-            msg = (
-                f"⚙️ [SYSTEM] *WHEATLEY UPDATE PROPOSAL*\n\n"
-                f"*Summary:* {summary}\n"
-                f"*Action:* Pull latest commits, update packages, and reload Wheatley\n\n"
-                f"Tap Update Now to proceed or Cancel."
-            )
         else:
             keyboard = InlineKeyboardMarkup(
                 [
@@ -948,23 +1162,35 @@ class TelegramBot(ChatInterface):
                     ]
                 ]
             )
-            msg = (
-                f"⚙️ [SYSTEM] *ACTION PROPOSAL REQUIRED*\n\n"
-                f"*Target:* `{target}`\n"
-                f"*Risk Level:* `{risk}`\n"
-                f"*Summary:* {summary}\n\n"
-                f"*Command to execute:*\n```bash\n{command}\n```\n\n"
-                f"Tap Approve to execute, or Deny to reject."
-            )
 
-        res = await self._send_or_reply(msg, chat_id=cid, reply_markup=keyboard)
+        msg = self._format_proposal_content(
+            proposal_type=proposal_type,
+            target=target,
+            command=command,
+            summary=summary,
+            risk=risk,
+            pattern=pattern,
+            justification=justification,
+        )
+        res = await self._send_or_reply(msg, target=target_message, chat_id=cid, reply_markup=keyboard)
         return res[0] if res else None
 
-    async def _dispatch_agent_proposals(self, chat_id: Optional[int] = None) -> None:
-        """Deliver any deferred proposals directly after the agent's message."""
-        if not self.agent or not hasattr(self.agent, "drain_pending_proposals"):
-            return
-        proposals = self.agent.drain_pending_proposals()
+    async def _dispatch_agent_proposals(
+        self,
+        turn: Any = None,
+        chat_id: Optional[int] = None,
+        target_message: Optional[Any] = None,
+    ) -> List[Any]:
+        """Deliver proposals attached to the agent turn (or drained from pending_proposals)."""
+        proposals = getattr(turn, "proposals", None)
+        if proposals is not None:
+            if self.agent and hasattr(self.agent, "drain_pending_proposals"):
+                self.agent.drain_pending_proposals()
+        elif self.agent and hasattr(self.agent, "drain_pending_proposals"):
+            proposals = self.agent.drain_pending_proposals()
+        else:
+            proposals = []
+
         for p in proposals:
             await self.send_proposal(
                 proposal_id=p.id,
@@ -976,7 +1202,9 @@ class TelegramBot(ChatInterface):
                 pattern=p.pattern,
                 justification=getattr(p, "justification", None),
                 chat_id=chat_id,
+                target_message=target_message,
             )
+        return proposals
 
     def set_command_handler(
         self, command: str, handler: Callable[..., Coroutine[Any, Any, None]]

@@ -192,7 +192,7 @@ class CheckEngine:
                 "params": getattr(check, "params", {}),
                 "schedule": [w.model_dump(exclude_none=True) for w in chk_sched],
                 "is_scheduled_pause": active_win is not None,
-                "active_schedule_window": active_win.format_short() if active_win else None,
+                "active_schedule_window": active_win.model_dump(exclude_none=True) if active_win else None,
                 "status": state.last_status.value if state else "UNKNOWN",
                 "is_muted": state.is_muted if state else False,
                 "muted_until": state.muted_until if state else None,

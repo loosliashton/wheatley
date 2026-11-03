@@ -381,9 +381,12 @@ class TelegramBot(ChatInterface):
                 status_str = f"MUTED (until {until_str})"
             elif is_sched_pause and active_win:
                 icon = "⏸️"
-                win_label = f"{active_win['start']}-{active_win['end']}"
-                if active_win.get("reason"):
-                    win_label += f": {active_win['reason']}"
+                if isinstance(active_win, dict):
+                    win_label = f"{active_win.get('start', '')}-{active_win.get('end', '')}"
+                    if active_win.get("reason"):
+                        win_label += f": {active_win['reason']}"
+                else:
+                    win_label = str(active_win)
                 status_str = f"PAUSED ({win_label})"
             elif status == "OK":
                 icon = "🟢"

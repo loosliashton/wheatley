@@ -375,4 +375,11 @@ async def test_check_engine_scheduled_pause(tmp_path):
         assert len(alerts_received) == 0
         states = engine.get_check_states()
         assert states[0]["is_scheduled_pause"] is True
+        assert states[0]["active_schedule_window"]["start"] == "00:00"
+
+        # Verify LLMAgent.build_system_prompt() formats the paused check cleanly without error
+        from wheatley.llm.agent import LLMAgent
+        agent = LLMAgent(cfg, audit, check_engine=engine, proxmox_clients={})
+        prompt = agent.build_system_prompt()
+        assert "PAUSED by schedule (00:00-00:00 (Maintenance))" in prompt
 

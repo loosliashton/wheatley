@@ -111,8 +111,18 @@ class LLMAgent:
                 if s["is_muted"]:
                     status_str = f"MUTED until {s['muted_until'].strftime('%H:%M UTC')}"
                 elif s.get("is_scheduled_pause"):
-                    win = s.get("active_schedule_window") or {}
-                    status_str = f"PAUSED by schedule ({win.get('start')}-{win.get('end')})"
+                    win = s.get("active_schedule_window")
+                    if isinstance(win, dict):
+                        start_time = win.get("start", "")
+                        end_time = win.get("end", "")
+                        win_label = f"{start_time}-{end_time}" if start_time and end_time else ""
+                        if win.get("reason"):
+                            win_label = f"{win_label} ({win['reason']})" if win_label else win["reason"]
+                    elif isinstance(win, str):
+                        win_label = win
+                    else:
+                        win_label = ""
+                    status_str = f"PAUSED by schedule ({win_label})" if win_label else "PAUSED by schedule"
                 else:
                     status_str = s["status"]
                 checks_info.append(f"• {s['id']} ({s['type']}): {status_str}")

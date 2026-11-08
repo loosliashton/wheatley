@@ -7,6 +7,7 @@ the systemd service.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import json
 import logging
@@ -15,7 +16,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from wheatley.audit import AuditLogger
+    from wheatley.chat.telegram import TelegramBot
+    from wheatley.config import UpdateConfig
 
 logger = logging.getLogger("wheatley.updater")
 
@@ -372,6 +378,146 @@ class WheatleyUpdater:
                 pass
 
         return False
+
+
+class UpdateChecker:
+    """Periodically checks for updates and notifies users via Telegram with an all-in-one update button."""
+
+    def __init__(
+        self,
+        config: Optional[Any] = None,
+        updater: Optional[WheatleyUpdater] = None,
+        bot: Optional[Any] = None,
+        audit: Optional[Any] = None,
+        repo_dir: Optional[Path | str] = None,
+    ):
+        if config is None:
+            from wheatley.config import UpdateConfig
+            config = UpdateConfig()
+        self.config = config
+        self.updater = updater or WheatleyUpdater(repo_dir=repo_dir)
+        self.bot = bot
+        self.audit = audit
+        self.last_notified_commit: Optional[str] = None
+        self._task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
+
+    async def check_and_notify(self) -> Optional[UpdateCheckResult]:
+        """Perform a single check for updates and notify via Telegram if an update is available."""
+        if not getattr(self.config, "enabled", True):
+            logger.debug("Periodic update checker is disabled.")
+            return None
+
+        if not self.bot:
+            logger.debug("Telegram bot is not connected; skipping update notification.")
+            return None
+
+        remote = getattr(self.config, "remote", "origin") or "origin"
+        branch = getattr(self.config, "branch", None)
+
+        try:
+            check_res: UpdateCheckResult = await asyncio.to_thread(
+                self.updater.check_for_updates,
+                remote=remote,
+                branch=branch,
+            )
+        except Exception as e:
+            logger.warning("Error running periodic update check: %s", e)
+            return None
+
+        if check_res.error:
+            logger.warning("Periodic update check failed: %s", check_res.error)
+            return check_res
+
+        if not check_res.has_update:
+            logger.debug("Periodic update check: Wheatley is up to date (%s).", check_res.current_commit)
+            self.last_notified_commit = None
+            return check_res
+
+        # Deduplication: do not send redundant alerts for the exact same remote commit
+        if self.last_notified_commit == check_res.remote_commit:
+            logger.info(
+                "Update to commit %s was already notified; skipping duplicate notification.",
+                check_res.remote_commit,
+            )
+            return check_res
+
+        logger.info(
+            "New update found! Current: %s, Remote: %s (%d commits). Notifying via Telegram...",
+            check_res.current_commit,
+            check_res.remote_commit,
+            len(check_res.incoming_commits),
+        )
+
+        try:
+            interval_hours = getattr(self.config, "interval_hours", 24.0)
+            expires_minutes = max(1440, int(interval_hours * 60))
+            await self.bot.send_update_proposal(check_res, expires_minutes=expires_minutes)
+            self.last_notified_commit = check_res.remote_commit
+            if self.audit:
+                self.audit.log_event(
+                    event_type="SYSTEM",
+                    source="update_checker",
+                    action="update_notification_sent",
+                    status="SUCCESS",
+                    details={
+                        "current_commit": check_res.current_commit,
+                        "remote_commit": check_res.remote_commit,
+                        "commits_count": len(check_res.incoming_commits),
+                    },
+                )
+        except Exception as e:
+            logger.exception("Failed to send update notification via Telegram: %s", e)
+
+        return check_res
+
+    async def _run_loop(self) -> None:
+        """Background loop that periodically executes check_and_notify."""
+        if getattr(self.config, "check_on_startup", True):
+            startup_delay = max(0.0, float(getattr(self.config, "startup_delay_seconds", 30.0)))
+            if startup_delay > 0:
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=startup_delay)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+            await self.check_and_notify()
+
+        while not self._stop_event.is_set():
+            interval_sec = max(60.0, float(getattr(self.config, "interval_seconds", 86400.0)))
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval_sec)
+                break
+            except asyncio.TimeoutError:
+                await self.check_and_notify()
+
+    def start(self) -> None:
+        """Start the periodic update checker background loop."""
+        if not getattr(self.config, "enabled", True):
+            logger.info("Periodic update checker is disabled.")
+            return
+        if self._task and not self._task.done():
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._run_loop())
+        logger.info(
+            "Periodic update checker started (interval: %.1fh, check_on_startup: %s).",
+            getattr(self.config, "interval_hours", 24.0),
+            getattr(self.config, "check_on_startup", True),
+        )
+
+    async def stop(self) -> None:
+        """Stop the periodic update checker background loop."""
+        if not self._task:
+            return
+        self._stop_event.set()
+        self._task.cancel()
+        try:
+            await self._task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._task = None
+        logger.info("Periodic update checker stopped.")
 
 
 def run_cli_update(args: any) -> int:

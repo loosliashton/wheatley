@@ -674,6 +674,47 @@ class TelegramBot(ChatInterface):
         else:
             await self._send_or_reply("⚙️ [SYSTEM] *Usage:* `/allowlist` (list rules) or `/allowlist revoke <id>` (remove rule)", target=update.message)
 
+    async def send_update_proposal(
+        self,
+        check_res: Any,
+        chat_id: Optional[int] = None,
+        expires_minutes: int = 1440,
+    ) -> Optional[Any]:
+        """Create a SELF_UPDATE proposal and send it via Telegram with an inline update button."""
+        commits = getattr(check_res, "incoming_commits", []) or []
+        if commits:
+            commits_summary = "\n".join(f"• `{c}`" for c in commits[:8])
+            if len(commits) > 8:
+                commits_summary += f"\n• _... and {len(commits) - 8} more_"
+        else:
+            commits_summary = "• _(latest upstream commits)_"
+
+        summary = f"Update Wheatley to {check_res.remote_commit} ({len(commits)} new commits)"
+        details = (
+            f"• Current: `{check_res.current_commit}`\n"
+            f"• Latest: `{check_res.remote_commit}` on `{check_res.branch}`\n\n"
+            f"*Incoming Commits:*\n{commits_summary}"
+        )
+        prop = self.approvals.create_proposal(
+            proposal_type="SELF_UPDATE",
+            target="localhost",
+            command="wheatley update",
+            summary=summary,
+            risk="MEDIUM",
+            justification=details,
+            expires_minutes=expires_minutes,
+        )
+        return await self.send_proposal(
+            proposal_id=prop.id,
+            summary=prop.summary,
+            command=prop.command,
+            target=prop.target,
+            risk=prop.risk,
+            proposal_type=prop.proposal_type,
+            justification=details,
+            chat_id=chat_id,
+        )
+
     async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
@@ -697,32 +738,8 @@ class TelegramBot(ChatInterface):
                 )
                 return
 
-            commits_summary = "\n".join(f"• `{c}`" for c in check_res.incoming_commits[:8])
-            if len(check_res.incoming_commits) > 8:
-                commits_summary += f"\n• _... and {len(check_res.incoming_commits) - 8} more_"
-
-            summary = f"Update Wheatley to {check_res.remote_commit} ({len(check_res.incoming_commits)} new commits)"
-            details = (
-                f"• Current: `{check_res.current_commit}`\n"
-                f"• Latest: `{check_res.remote_commit}` on `{check_res.branch}`\n\n"
-                f"*Incoming Commits:*\n{commits_summary}"
-            )
-            prop = self.approvals.create_proposal(
-                proposal_type="SELF_UPDATE",
-                target="localhost",
-                command="wheatley update",
-                summary=summary,
-                risk="MEDIUM",
-                justification=details,
-            )
-            await self.send_proposal(
-                proposal_id=prop.id,
-                summary=prop.summary,
-                command=prop.command,
-                target=prop.target,
-                risk=prop.risk,
-                proposal_type=prop.proposal_type,
-                justification=details,
+            await self.send_update_proposal(
+                check_res=check_res,
                 chat_id=update.effective_chat.id if update.effective_chat else None,
             )
 

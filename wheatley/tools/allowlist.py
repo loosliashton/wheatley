@@ -455,7 +455,7 @@ def is_self_guest_targeted(
         cmd_clean = command.strip()
         if cmd_clean:
             vmid_esc = re.escape(self_vmid)
-            # VMID must be a whole token (not part of an IP like 10.0.0.110 or a larger number)
+            # VMID must be a whole token (not part of an IP address or a larger number)
             vmid_tok = rf"(?<![\w.:/-]){vmid_esc}(?![\w.:-])"
             # pct/qm <subcommand> [guest-subcommand] <vmid>  (e.g. 'pct stop 110', 'qm guest exec 110')
             if re.search(rf"\b(?:pct|qm)\s+(?:guest\s+)?[a-z][a-z-]*\s+{vmid_tok}", cmd_clean):

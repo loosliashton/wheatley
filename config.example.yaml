@@ -84,6 +84,15 @@ health:
   push_interval_seconds: 60
   push_method: GET                   # GET, or POST (sends the health report as JSON)
 
+# Periodic Self-Update Checks
+# Wheatley periodically checks its GitHub repository for updates and notifies
+# you via Telegram with a single-tap "🚀 Update Now" button to pull and restart.
+updates:
+  enabled: true                      # Enable periodic background checks for updates
+  interval_hours: 24                 # How often to check for updates (in hours)
+  check_on_startup: true             # Check for updates shortly after daemon startup
+  startup_delay_seconds: 30          # Seconds to wait after startup before the initial check
+
 # ------------------------------------------------------------------------------
 # Monitored Checks File (Mandatory Separation)
 # ------------------------------------------------------------------------------

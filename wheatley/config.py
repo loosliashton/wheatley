@@ -318,6 +318,33 @@ class HealthConfig(BaseModel):
     push_timeout_seconds: float = Field(10.0, gt=0)
 
 
+class UpdateConfig(BaseModel):
+    """Configuration for periodic background self-update checks."""
+    enabled: bool = Field(True, description="Enable periodic background checks for updates")
+    interval_hours: float = Field(24.0, gt=0, description="Interval in hours between update checks")
+    check_on_startup: bool = Field(True, description="Whether to check for updates shortly after startup")
+    startup_delay_seconds: float = Field(30.0, ge=0, description="Delay in seconds before the first check on startup")
+    remote: str = Field("origin", description="Git remote name (default: origin)")
+    branch: Optional[str] = Field(None, description="Git branch to check (default: current checked out branch)")
+
+    @property
+    def interval_seconds(self) -> float:
+        return self.interval_hours * 3600.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if "check_interval_hours" in data and "interval_hours" not in data:
+                data["interval_hours"] = data.pop("check_interval_hours")
+            if "interval_seconds" in data and "interval_hours" not in data:
+                data["interval_hours"] = float(data.pop("interval_seconds")) / 3600.0
+            if "check_interval_seconds" in data and "interval_hours" not in data:
+                data["interval_hours"] = float(data.pop("check_interval_seconds")) / 3600.0
+        return data
+
+
 class WheatleyConfig(BaseModel):
     nodes: List[NodeConfig] = Field(default_factory=list)
     self_guest: Optional[str] = Field(None, description="e.g. pve-node-01/110 to protect agent self")
@@ -331,6 +358,7 @@ class WheatleyConfig(BaseModel):
     checks: List[CheckConfig] = Field(default_factory=list)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+    updates: UpdateConfig = Field(default_factory=UpdateConfig)
     allowlist: List[str] = Field(
         default_factory=lambda: [
             "uptime",
@@ -346,6 +374,15 @@ class WheatleyConfig(BaseModel):
             "sensors -j",
         ]
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def alias_updates(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "update" in data and "updates" not in data:
+                data = dict(data)
+                data["updates"] = data.pop("update")
+        return data
 
     @field_validator("nodes")
     @classmethod

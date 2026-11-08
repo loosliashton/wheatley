@@ -50,6 +50,7 @@ class WheatleyApp:
         self.orchestrator: ProposalOrchestrator | None = None
         self.webhook_server: WebhookServer | None = None
         self.health = HealthMonitor(self.config.health)
+        self.update_checker: Any | None = None
         self._stop_event = asyncio.Event()
 
     async def get_status_overview(self) -> str:
@@ -106,6 +107,7 @@ class WheatleyApp:
         lines.extend([
             "📊 *Monitoring & Controls*",
             f"• *Checks Active:* `{len([c for c in self.config.checks if c.enabled])}`",
+            f"• *Auto-Updates:* `{'enabled' if self.config.updates.enabled else 'disabled'}`",
             f"• *Self-Protection:* `{self.config.self_guest or 'disabled'}`",
             f"• *LLM:* `{self.config.llm.provider}` (`{self.config.llm.model}`)",
         ])
@@ -226,6 +228,15 @@ class WheatleyApp:
         # 7. Optional push heartbeat (starts after the bot so the first ping reflects a healthy state)
         self.health.start()
 
+        # 8. Start periodic self-update checker
+        from wheatley.updater import UpdateChecker
+        self.update_checker = UpdateChecker(
+            config=self.config.updates,
+            bot=self.bot,
+            audit=self.audit,
+        )
+        self.update_checker.start()
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -237,6 +248,8 @@ class WheatleyApp:
         await self._stop_event.wait()
 
         logger.info("Shutting down Wheatley...")
+        if self.update_checker:
+            await self.update_checker.stop()
         await self.health.stop()
         if self.webhook_server:
             await self.webhook_server.stop()

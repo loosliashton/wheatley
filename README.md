@@ -185,7 +185,7 @@ From your authorized Telegram chat:
 - `/unmute <check_id>` — Re-enables alerts for a silenced check.
 - `/discover` — Probes nodes & guests to auto-detect active services and container environments.
 - `/audit` — Views recent security, webhook, and operational audit events.
-- `/update` — Checks for available GitHub updates and proposes self-update.
+- `/update` — Checks for available GitHub updates and proposes self-update with an all-in-one update button (Wheatley also periodically checks for updates in the background and notifies Telegram).
 - `/help` — Displays command cheat sheet and operational guidelines.
 
 ---

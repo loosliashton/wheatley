@@ -29,7 +29,6 @@ SUDO_HOST_COMMANDS = {
     "pvesm",
     "zpool",
     "smartctl",
-    "sensors",
     "journalctl",
     "systemctl",
 }

@@ -306,6 +306,7 @@ wheatley ALL=(ALL) NOPASSWD: \
     /usr/sbin/zpool status*, \
     /usr/sbin/zpool list*, \
     /usr/sbin/smartctl *, \
+    /usr/bin/sensors, \
     /usr/bin/sensors *, \
     /bin/systemctl status *, \
     /usr/bin/systemctl status *, \
@@ -329,12 +330,27 @@ if [[ -f /etc/pve/local/pve-ssl.pem ]]; then
   FINGERPRINT=$(openssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256 | cut -d= -f2)
 fi
 
+CT_EXISTS=false
+if command -v pct >/dev/null 2>&1 && pct status 110 >/dev/null 2>&1; then
+  CT_EXISTS=true
+fi
+
 echo ""
 echo "================================================="
 echo " Setup complete for node: $NODE_NAME (NODE${NODE_INDEX})"
-echo " Save these entries! You will paste them into"
-echo " /etc/wheatley/secrets.env inside the Wheatley"
-echo " container (CT 110) after running create-lxc.sh:"
+if [[ "$NODE_INDEX" -gt 1 || -n "$SSH_KEY" ]]; then
+  echo " Save these entries! Paste them into"
+  echo " /etc/wheatley/secrets.env inside the Wheatley"
+  echo " container (CT 110 on your primary Proxmox node):"
+elif [[ "$CT_EXISTS" == "true" ]]; then
+  echo " Save these entries! Paste them into"
+  echo " /etc/wheatley/secrets.env inside the Wheatley"
+  echo " container (CT 110):"
+else
+  echo " Save these entries! You will paste them into"
+  echo " /etc/wheatley/secrets.env inside the Wheatley"
+  echo " container (CT 110) after running create-lxc.sh:"
+fi
 echo "================================================="
 if [[ -n "$SECRET_VALUE" ]]; then
   echo "NODE${NODE_INDEX}_TOKEN_MONITOR=\"wheatley@pve!${TOKEN_NAME}=${SECRET_VALUE}\""
@@ -345,5 +361,11 @@ if [[ -n "$FINGERPRINT" ]]; then
   echo "NODE${NODE_INDEX}_TLS_FINGERPRINT=\"${FINGERPRINT}\""
 fi
 echo "================================================="
-echo " Next step: Run ./install/create-lxc.sh to provision the Wheatley container."
+if [[ "$NODE_INDEX" -gt 1 || -n "$SSH_KEY" ]]; then
+  echo " Next step: Add NODE${NODE_INDEX}_* to /etc/wheatley/secrets.env on CT 110."
+elif [[ "$CT_EXISTS" == "true" ]]; then
+  echo " Next step: Paste credentials into /etc/wheatley/secrets.env inside CT 110 (or run 'pct enter 110')."
+else
+  echo " Next step: Run ./install/create-lxc.sh to provision the Wheatley container."
+fi
 echo "================================================="

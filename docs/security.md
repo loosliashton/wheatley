@@ -54,6 +54,7 @@ Wheatley separates its security controls into two distinct layers:
          /usr/sbin/zpool status*, \
          /usr/sbin/zpool list*, \
          /usr/sbin/smartctl *, \
+         /usr/bin/sensors, \
          /usr/bin/sensors *, \
          /bin/systemctl status *, \
          /usr/bin/systemctl status *, \

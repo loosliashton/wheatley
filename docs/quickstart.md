@@ -60,6 +60,7 @@ Create an unprivileged Debian container (default: `CT 110`) to run Wheatley:
 ## 3. Configuration
 
 Enter the container (`pct enter 110`):
+*(Note: `create-lxc.sh` automatically seeds `/etc/wheatley/secrets.env`, `config.yaml`, and `checks.yaml` from `/opt/wheatley/`. You do not need to run `cp`; directly edit the pre-created files.)*
 
 1. **Secrets (`/etc/wheatley/secrets.env`):**
    ```bash

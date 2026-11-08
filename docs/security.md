@@ -4,27 +4,37 @@ Wheatley is designed from the ground up for safe, resilient homelab automation. 
 
 ---
 
-## 1. Threat Model & Sandboxing
+## 1. Threat Model & Trust Boundaries
 
-Wheatley employs defense-in-depth across the operating system, container runtime, API layer, and network boundaries:
+Wheatley separates its security controls into two distinct layers:
+- **LLM Safety Guardrails (Application Layer):** The read-only command allowlist, `self_guest` protection, and the interactive Telegram **[Approve] / [Deny]** gate are enforced by Wheatley's Python process (`AgentToolbox` and `ProposalOrchestrator`) to constrain what the AI model can run without human consent.
+- **Host & Network Hardening (OS Layer):** Container isolation, read-only Proxmox API tokens, SSH key restrictions, and scoped host `sudoers` rules limit blast radius on the Proxmox host itself.
+
+> [!IMPORTANT]
+> **Treat the Wheatley Container as a High-Value Control Node**
+> Because Wheatley needs to run diagnostics and approved actions across your guests, its SSH key (`/var/lib/wheatley/.ssh/id_ed25519`) is granted `sudo /usr/sbin/pct exec *` and `sudo /usr/sbin/qm guest exec *` on monitored Proxmox nodes. While the interactive approval gate is enforced by Wheatley's code against the LLM, **anyone who gains root access to the Wheatley container or exfiltrates its SSH private key effectively has root inside every LXC container and QEMU VM** (as well as power control over guests). Secure the Wheatley LXC with the same care as an Ansible control node or management bastion.
+
+### Host & Container Hardening Layers
 
 1. **Unprivileged Dedicated LXC Container (`CT 110`):**
    - Wheatley runs inside an unprivileged Debian container provisioned via `install/create-lxc.sh`.
-   - Root inside the container maps to unprivileged UIDs (`100000+`) on the Proxmox host kernel, preventing host root breakouts or direct block device manipulation.
-   - The systemd service runs under a dedicated, unprivileged system account (`User=wheatley`, `Group=wheatley`) inside the container.
+   - Root inside the container maps to unprivileged UIDs (`100000+`) on the Proxmox host kernel, preventing container-to-host kernel breakouts or direct block device manipulation.
+   - The systemd service and CLI wrapper run under a dedicated system account (`User=wheatley`, `Group=wheatley`) inside the container.
 
 2. **Least-Privilege PVE API Tokens:**
    - Wheatley connects to Proxmox VE nodes using native `@pve` API tokens created via `install/host-setup.sh`.
-   - The token is granted only the `PVEAuditor` role at `/`. It can read node telemetry, guest configs, storage pools, and task logs, but **cannot** create, delete, or reconfigure VMs or storage through the API.
-   - API calls enforce SHA-256 TLS certificate fingerprint pinning (`tls_fingerprint`), protecting against LAN man-in-the-middle attacks even with self-signed cluster certificates.
+   - The token is granted only the `PVEAuditor` role at `/`. It can read node telemetry, guest configs, storage pools, and task logs, but **cannot** create, delete, or reconfigure VMs or storage through the REST API.
+   - API calls enforce SHA-256 TLS certificate fingerprint pinning (`tls_fingerprint`). SSH connections use Trust-On-First-Use (TOFU) host key pinning in `/var/lib/wheatley/.ssh/known_hosts`: the first connection to a node accepts and records the server's public key, and all subsequent connections verify against that pinned key.
 
-3. **Restricted Host Shell Wrapper (`wheatley-shell`):**
-   - Host SSH access is locked to `/usr/local/bin/wheatley-shell` installed by `install/host-setup.sh`.
-   - Interactive shell sessions (PTY allocation, bash prompts) are strictly disabled.
-   - Commands must be passed non-interactively via SSH (`SSH_ORIGINAL_COMMAND`).
+3. **Non-Interactive Host SSH Wrapper (`wheatley-shell`) & Key Restrictions:**
+   - The `wheatley` user on Proxmox hosts uses `/usr/local/bin/wheatley-shell` (installed by `install/host-setup.sh`) and `no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty` in `/home/wheatley/.ssh/authorized_keys`.
+   - Interactive shell logins, PTY allocation, and SSH port/SOCKS forwarding are disabled.
+   - Guest execution commands (`sudo /usr/sbin/pct exec <vmid> -- /bin/bash -c <arg>` and `sudo /usr/sbin/qm guest exec <vmid> -- /bin/bash -c <arg>`) must match that exact form with a single quoted argument and no trailing tokens.
+   - Direct host commands may use pipes and standard redirections, while `wheatley-shell` rejects multiline input, command chaining (`;`, `&&`, `||`, background `&`), command/process substitution (`$(...)`, backticks, `<(...)`, `>(...)`), ANSI-C quoting (`$'...'`), `pct/qm destroy`, and interactive `sudo` shell flags (`sudo -i`, `sudo -s`, `sudo su`, `sudo bash`).
+   - Note that `wheatley-shell` is a defense-in-depth wrapper, not a privilege boundary: root privileges on the Proxmox host are governed exclusively by `/etc/sudoers.d/wheatley`, and which commands the LLM may run without human consent is governed by Wheatley's application allowlist.
 
-4. **Narrow Sudoers Permissions:**
-   - Sudoers rules in `/etc/sudoers.d/wheatley` on monitored hosts are strictly restricted to read-only diagnostics, guest exec wrappers, and non-destructive guest lifecycle operations:
+4. **Scoped Host Sudoers Permissions (`/etc/sudoers.d/wheatley`):**
+   - On the **Proxmox host OS**, `sudo` is restricted to specific diagnostic tools, guest power commands, and guest exec wrappers:
      ```sudoers
      wheatley ALL=(ALL) NOPASSWD: \
          /usr/sbin/pct exec *, \
@@ -58,11 +68,12 @@ Wheatley employs defense-in-depth across the operating system, container runtime
          /usr/bin/uptime, \
          /usr/bin/free *
      ```
-   - Wheatley has no arbitrary root execution rights or destructive VM/CT deletion rights on the Proxmox host.
+   - The `wheatley` user cannot `sudo` arbitrary root commands on the **Proxmox host OS** itself, nor can it run `pct destroy` or `qm destroy`.
+   - **Guest Scope Note:** `pct exec *` and `qm guest exec *` intentionally grant root command execution **inside every guest VM and container** on the node so Wheatley can perform in-guest diagnostics and approved remediations. The boundary between read-only diagnostics and mutating commands inside guests is enforced by Wheatley's application-layer allowlist and approval gate.
 
 5. **Self-Guest Protection:**
    - The `self_guest` configuration parameter (e.g. `self_guest: "pve-node-01/110"`) protects Wheatley's own container.
-   - Wheatley refuses to stop, restart, or execute mutating actions against its own container, preventing accidental self-termination.
+   - Wheatley refuses to propose or execute mutating actions targeting `self_guest`—whether addressed directly (`pve-node-01/110`) or via host-level `pct`/`qm`/`pvesh` commands referencing its VMID—preventing accidental self-termination.
 
 ---
 

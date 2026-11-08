@@ -35,7 +35,7 @@ Run the host setup script on your primary Proxmox VE node:
 
 This script:
 - Creates a dedicated `wheatley@pve` user and `wheatley@pve!bot` API token with `PVEAuditor` read-only privileges on `/`.
-- Creates a restricted `wheatley` Linux user locked to `/usr/local/bin/wheatley-shell` with narrow sudoers rules.
+- Creates a dedicated `wheatley` Linux user configured with `/usr/local/bin/wheatley-shell` (disabling interactive logins and blocking host command chaining / `pct` & `qm destroy`) and scoped `sudoers` rules for host diagnostics and guest execution.
 - Prints your `NODE1_TOKEN_MONITOR` and `NODE1_TLS_FINGERPRINT` entries to save for `/etc/wheatley/secrets.env` (created inside the container in Step B).
 
 ### Step B: Provision the Dedicated LXC Container
@@ -77,6 +77,8 @@ Enter the container (`pct enter 110`):
    Checks are stored in `/etc/wheatley/checks.yaml` (enforced by the configuration loader). You can auto-generate checks for your running VMs, containers, and services, or edit the file manually:
    ```bash
    wheatley discover --output /etc/wheatley/checks.yaml
+   # Note: If checks.yaml already exists, pass --force / -f to overwrite (a .bak backup will be saved automatically).
+   # You can also generate to a separate file for review: wheatley discover --output /etc/wheatley/checks.discovered.yaml
    nano /etc/wheatley/checks.yaml
    ```
 
@@ -97,3 +99,39 @@ systemctl status wheatley
 ```
 
 Send `/status` to your bot in Telegram to verify connectivity!
+
+---
+
+## 5. Proxmox Notification Webhooks (PVE 8.1+ & 9.x)
+
+Wheatley includes a native webhook receiver listening on port `8088` (`/webhook/pve`) to intercept Proxmox VE notification events (such as vzdump backup failures, SMART alerts, and replication issues) and push alerts to Telegram.
+
+### Webhook Target Setup in Proxmox Web GUI
+
+1. Navigate to **Datacenter → Notifications → Notification Targets → Add → Webhook**:
+   - **Name:** `wheatley-webhook`
+   - **Method:** `POST`
+   - **URL:** `http://<wheatley-ct-ip>:8088/webhook/pve`
+   - **Headers:**
+     - `Content-Type: application/json`
+     - `Authorization: Bearer {{ secrets.token }}`
+   - **Secrets:**
+     - Key: `token` | Value: `<value of WEBHOOK_SECRET_TOKEN from /etc/wheatley/secrets.env>`
+   - **Body Template:**
+     ```json
+     {
+       "title": "{{ escape title }}",
+       "message": "{{ escape message }}",
+       "severity": "{{ severity }}",
+       "data": {{ json fields }}
+     }
+     ```
+
+2. Navigate to **Datacenter → Notifications → Notification Matchers → Add**:
+   - **Name:** `wheatley-alerts`
+   - **Target to notify:** Select `wheatley-webhook`
+   - **Match Severity:** Check `warning` and `error`
+
+> **Note on Webhook Authentication & Testing:**
+> - **Required Secret Token:** Incoming requests to `/webhook/*` are rejected with `401 Unauthorized` if `WEBHOOK_SECRET_TOKEN` is unset or left at the default placeholder. `install/create-lxc.sh` automatically generates a random token in `/etc/wheatley/secrets.env`; if you are upgrading an existing installation, ensure `WEBHOOK_SECRET_TOKEN` is set in `/etc/wheatley/secrets.env` and restart `wheatley`.
+> - **Test Button Behavior:** When clicking the **Test** button in Proxmox VE, PVE sends an event with severity `info`. Wheatley logs `info` events directly to the local audit log (`wheatley audit`) rather than spamming Telegram. Actual job failures or warnings (`warning` or `error`) immediately trigger formatted Telegram alerts.

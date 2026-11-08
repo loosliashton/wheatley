@@ -20,6 +20,7 @@ def get_llm_provider(config: LLMConfig) -> BaseLLMProvider:
         from wheatley.llm.providers.gemini import GeminiProvider
         return GeminiProvider(
             model=config.model,
+            fallback_models=config.fallback_models,
             api_key=config.api_key,
             temperature=config.temperature,
         )

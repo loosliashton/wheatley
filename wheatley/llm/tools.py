@@ -13,7 +13,12 @@ from wheatley.audit import AuditLogger
 from wheatley.checks.engine import CheckEngine
 from wheatley.config import WheatleyConfig
 from wheatley.llm.base import ToolDefinition
-from wheatley.tools.allowlist import DEFAULT_ALLOWLIST, is_command_allowed, validate_proposed_pattern
+from wheatley.tools.allowlist import (
+    DEFAULT_ALLOWLIST,
+    is_command_allowed,
+    is_self_guest_targeted,
+    validate_proposed_pattern,
+)
 from wheatley.tools.proxmox import ProxmoxClient
 from wheatley.tools.shell import ShellExecutor
 
@@ -396,14 +401,18 @@ class AgentToolbox:
             "details": res.details,
         }
 
-    def _build_candidate_pattern(self, command: str) -> str:
+    def _build_candidate_pattern(self, command: str) -> Optional[str]:
         cmd_parts = command.strip().split()
         if len(cmd_parts) >= 2:
             candidate = f"{cmd_parts[0]} {cmd_parts[1]} *"
             valid, _ = validate_proposed_pattern(candidate)
             if valid:
                 return candidate
-        return command.strip()
+        exact = command.strip()
+        valid_exact, _ = validate_proposed_pattern(exact)
+        if valid_exact:
+            return exact
+        return None
 
     async def run_host_command(
         self,
@@ -417,6 +426,11 @@ class AgentToolbox:
         effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
         allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
+            if is_self_guest_targeted(self.config.self_guest, target, command):
+                return {
+                    "status": "REFUSED",
+                    "reason": f"Self-protection triggered: Command targets Wheatley's own guest ('{self.config.self_guest}').",
+                }
             logger.info("Host command '%s' on %s blocked by allowlist (%s); halting for approval", command, node, reason)
             candidate_pattern = self._build_candidate_pattern(command)
             prop_summary = summary or f"Execute diagnostic command on {target}"
@@ -460,6 +474,11 @@ class AgentToolbox:
         effective_allowlist = list(set(DEFAULT_ALLOWLIST + list(self.config.allowlist))) + active_user_rules
         allowed, reason = is_command_allowed(command, effective_allowlist)
         if not allowed:
+            if is_self_guest_targeted(self.config.self_guest, target, command):
+                return {
+                    "status": "REFUSED",
+                    "reason": f"Self-protection triggered: Target '{target}' is running the Wheatley agent.",
+                }
             logger.info("Guest command '%s' on %s blocked by allowlist (%s); halting for approval", command, target, reason)
             candidate_pattern = self._build_candidate_pattern(command)
             prop_summary = summary or f"Execute diagnostic command on {target}"
@@ -495,10 +514,10 @@ class AgentToolbox:
         return {"audit_events": logs}
 
     def propose_action(self, target: str, command: str, summary: str, risk: str) -> Dict[str, Any]:
-        if self.config.self_guest and target == self.config.self_guest:
+        if is_self_guest_targeted(self.config.self_guest, target, command):
             return {
                 "status": "REFUSED",
-                "reason": f"Self-protection triggered: Target '{target}' is running the Wheatley agent.",
+                "reason": f"Self-protection triggered: Target '{self.config.self_guest}' is running the Wheatley agent.",
             }
 
         prop = self.approvals.create_proposal(

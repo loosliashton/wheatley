@@ -14,7 +14,9 @@ In `/etc/wheatley/config.yaml`:
 ```yaml
 llm:
   provider: gemini
-  model: gemini-2.5-flash
+  model: gemini-3.8-flash
+  fallback_models:               # optional: tried automatically if the primary model returns 503 or 429
+    - gemini-3.5-flash
   history_turns: 10
   session_timeout_minutes: 60    # auto-resets context after 60 min inactivity (0 to disable)
   max_tool_iterations: 10
@@ -24,6 +26,14 @@ In `/etc/wheatley/secrets.env`:
 ```bash
 GEMINI_API_KEY="AIzaSy..."
 ```
+
+> **Model Names & Discovery:**
+> - Specify the bare model name without the `models/` prefix (e.g. `gemini-3.8-flash`, not `models/gemini-3.8-flash`). If `models/` is accidentally included, Wheatley strips it automatically.
+> - To check which models are available for your API key, run:
+>   ```bash
+>   curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY" | grep '"name"'
+>   ```
+> - Use `fallback_models` to ensure high availability if your primary model experiences transient capacity spikes (e.g. `503 UNAVAILABLE`).
 
 ---
 

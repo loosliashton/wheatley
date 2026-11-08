@@ -157,6 +157,7 @@ class WheatleyApp:
             shell=self.check_engine.shell,
             check_engine=self.check_engine,
             agent=self.llm_agent,
+            self_guest=self.config.self_guest,
         )
 
         if self.config.chat.telegram:
@@ -288,10 +289,25 @@ def cmd_discover(args: argparse.Namespace) -> None:
             return
 
         if getattr(args, "output", None):
+            out_path = Path(args.output)
+            force = getattr(args, "force", False)
+            if out_path.exists() and not force:
+                print(f"❌ Error: Destination checks file '{out_path}' already exists!", file=sys.stderr)
+                print("   To overwrite, specify --force / -f, or output to a new file (e.g. -o /etc/wheatley/checks.discovered.yaml).", file=sys.stderr)
+                sys.exit(1)
+
             draft = discovery.generate_draft_config(guests)
             checks_payload = {"checks": draft["checks"]}
-            out_path = Path(args.output)
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_path.exists():
+                backup_path = out_path.with_suffix(out_path.suffix + ".bak")
+                try:
+                    import shutil
+                    shutil.copy2(out_path, backup_path)
+                    print(f"📋 Backed up existing checks file to: {backup_path}")
+                except Exception as be:
+                    logger.warning("Could not backup existing checks file: %s", be)
+
             with open(out_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(checks_payload, f, sort_keys=False, default_flow_style=False)
             print(f"✅ Recommended checks configuration written to: {out_path}")
@@ -488,6 +504,7 @@ def main() -> None:
     p_disc.add_argument("--config", "-c", default="/etc/wheatley/config.yaml", help="Path to config.yaml")
     p_disc.add_argument("--secrets", "-s", default="/etc/wheatley/secrets.env", help="Path to secrets.env")
     p_disc.add_argument("--output", "-o", help="Path to write recommended checks.yaml file")
+    p_disc.add_argument("--force", "-f", action="store_true", help="Overwrite existing output file if it already exists (creates a .bak backup)")
     p_disc.add_argument("--json", action="store_true", help="Output discovered inventory as JSON")
 
     # Config validate

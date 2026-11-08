@@ -42,7 +42,9 @@ self_guest: "pve-node-01/110"
 #   - Any OpenAI-compatible endpoint (vLLM, LocalAI, DeepSeek, OpenWebUI)
 llm:
   provider: "gemini"               # Options: gemini, ollama, openai, groq, openai_compatible
-  model: "gemini-3.8-flash"        # Model name
+  model: "gemini-3.8-flash"        # Model name (omit 'models/' prefix)
+  # fallback_models:               # Optional failover models on 503 / 429
+  #   - "gemini-3.5-flash"
   api_key: "${GEMINI_API_KEY}"     # Or set via env var (e.g. GEMINI_API_KEY or OPENAI_API_KEY)
   # api_base: "http://localhost:11434/v1" # Base URL (defaults to localhost:11434/v1 for ollama)
   temperature: 0.2

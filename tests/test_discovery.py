@@ -138,3 +138,50 @@ def test_format_summary_markdown(dummy_config):
     assert "Plex Media Server" in summary
     assert "32400" in summary
     assert "pve1" in summary
+
+
+def test_cmd_discover_output_overwrite_protection(tmp_path, monkeypatch):
+    import argparse
+    from unittest.mock import AsyncMock, patch
+    from wheatley.cli import cmd_discover
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("nodes: []\nchat:\n  telegram:\n    bot_token: 't'\n    allowed_user_ids: [1]\n")
+    sec_file = tmp_path / "secrets.env"
+    sec_file.write_text("")
+
+    out_file = tmp_path / "checks.yaml"
+    out_file.write_text("# existing customized checks\n")
+
+    # Mock scan_all to return empty guests
+    with patch("wheatley.discovery.discover.InventoryDiscovery.scan_all", new_callable=AsyncMock) as mock_scan:
+        mock_scan.return_value = []
+
+        # Running without --force when file exists should exit with code 1
+        args_no_force = argparse.Namespace(
+            config=str(cfg_file),
+            secrets=str(sec_file),
+            output=str(out_file),
+            force=False,
+            json=False,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_discover(args_no_force)
+        assert exc_info.value.code == 1
+        assert out_file.read_text() == "# existing customized checks\n"
+
+        # Running with --force should succeed, create a backup, and write new checks
+        args_force = argparse.Namespace(
+            config=str(cfg_file),
+            secrets=str(sec_file),
+            output=str(out_file),
+            force=True,
+            json=False,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_discover(args_force)
+        assert exc_info.value.code == 0
+        bak_file = tmp_path / "checks.yaml.bak"
+        assert bak_file.exists()
+        assert bak_file.read_text() == "# existing customized checks\n"
+        assert "checks:" in out_file.read_text()

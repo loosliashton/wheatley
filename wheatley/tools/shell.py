@@ -83,15 +83,60 @@ class ShellExecutor:
                 if default_key.is_file():
                     key_paths.append(str(default_key))
 
+            if ssh_cfg.known_hosts_path:
+                kh_path = Path(ssh_cfg.known_hosts_path)
+            elif key_paths:
+                kh_path = Path(key_paths[0]).parent / "known_hosts"
+            else:
+                kh_path = Path("/var/lib/wheatley/.ssh/known_hosts")
+
+            known_hosts_arg = None
+            if kh_path.is_file():
+                try:
+                    kh = asyncssh.read_known_hosts(str(kh_path))
+                    trusted_keys = kh.match(ssh_cfg.host, ssh_cfg.host, ssh_cfg.port)[0]
+                    if trusted_keys:
+                        known_hosts_arg = kh
+                except Exception as e:
+                    logger.warning("Could not parse SSH known_hosts at %s: %s", kh_path, e)
+
             logger.info("Opening SSH connection to %s (%s:%d) as %s", node_name, ssh_cfg.host, ssh_cfg.port, ssh_cfg.user)
             conn = await asyncssh.connect(
                 host=ssh_cfg.host,
                 port=ssh_cfg.port,
                 username=ssh_cfg.user,
                 client_keys=key_paths if key_paths else None,
-                known_hosts=None,  # CT 110 runs in automated cluster env
+                known_hosts=known_hosts_arg,
                 login_timeout=10,
             )
+
+            # Trust-On-First-Use (TOFU): persist server host key if not yet recorded
+            if known_hosts_arg is None and hasattr(conn, "get_server_host_key"):
+                try:
+                    server_key = conn.get_server_host_key()
+                    if isinstance(server_key, asyncssh.SSHKey):
+                        kh_path.parent.mkdir(parents=True, exist_ok=True)
+                        pub_line = server_key.export_public_key("openssh").decode("utf-8").strip()
+                        host_entry = f"[{ssh_cfg.host}]:{ssh_cfg.port}" if ssh_cfg.port != 22 else ssh_cfg.host
+                        new_line = f"{host_entry} {pub_line}"
+                        existing_lines: set[str] = set()
+                        if kh_path.is_file():
+                            existing_lines = {
+                                ln.strip()
+                                for ln in kh_path.read_text(encoding="utf-8").splitlines()
+                                if ln.strip()
+                            }
+                        if new_line not in existing_lines:
+                            with open(kh_path, "a", encoding="utf-8") as kh_file:
+                                kh_file.write(f"{new_line}\n")
+                        try:
+                            kh_path.chmod(0o600)
+                        except OSError:
+                            pass
+                        logger.info("Pinned SSH host key (TOFU) for node %s (%s) in %s", node_name, host_entry, kh_path)
+                except Exception as e:
+                    logger.warning("Could not persist TOFU SSH host key for %s at %s: %s", node_name, kh_path, e)
+
             self._conns[node_name] = conn
             return conn
 

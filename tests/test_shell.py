@@ -173,3 +173,54 @@ async def test_execute_in_guest_caches_lxc_type(test_config):
         assert res2.success
         assert mock_vm.call_count == 1
         assert mock_lxc.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ssh_tofu_known_hosts_pinning(test_config, tmp_path):
+    import asyncssh
+
+    kh_file = tmp_path / "known_hosts"
+    test_config.nodes[0].ssh.known_hosts_path = str(kh_file)
+    executor = ShellExecutor(test_config)
+
+    generated_key = asyncssh.generate_private_key("ssh-ed25519")
+
+    mock_run_res = MagicMock()
+    mock_run_res.exit_status = 0
+    mock_run_res.stdout = "up 1 day\n"
+    mock_run_res.stderr = ""
+
+    mock_conn1 = MagicMock()
+    mock_conn1.is_closed.return_value = False
+    mock_conn1.run = AsyncMock(return_value=mock_run_res)
+    mock_conn1.get_server_host_key.return_value = generated_key
+
+    with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
+        mock_connect.return_value = mock_conn1
+
+        # 1. First connection: known_hosts does not exist yet -> connects with known_hosts=None and pins key
+        res1 = await executor.execute_on_host("pve-node-01", "uptime")
+        assert res1.success
+        assert mock_connect.call_args.kwargs["known_hosts"] is None
+        assert kh_file.is_file()
+        assert "192.168.1.111 ssh-ed25519" in kh_file.read_text()
+
+        # Simulate reconnect: second connection loads and passes pinned SSHKnownHosts object
+        mock_conn1.is_closed.return_value = True
+        mock_conn2 = MagicMock()
+        mock_conn2.is_closed.return_value = False
+        mock_conn2.run = AsyncMock(return_value=mock_run_res)
+        mock_connect.return_value = mock_conn2
+
+        res2 = await executor.execute_on_host("pve-node-01", "uptime")
+        assert res2.success
+        assert mock_connect.call_args.kwargs["known_hosts"] is not None
+
+
+def test_wheatley_shell_inline_copy_matches_file():
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    shell_content = (repo_root / "install" / "wheatley-shell").read_text(encoding="utf-8").rstrip("\n")
+    host_setup = (repo_root / "install" / "host-setup.sh").read_text(encoding="utf-8")
+    assert shell_content in host_setup, "Inline wheatley-shell fallback in host-setup.sh is out of sync with install/wheatley-shell"

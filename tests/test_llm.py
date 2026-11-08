@@ -80,10 +80,17 @@ def test_llm_config_defaults():
 
 def test_provider_factory():
     # Gemini
-    p_gemini = get_llm_provider(LLMConfig(provider="gemini", model="gemini-3.8-flash"))
+    p_gemini = get_llm_provider(
+        LLMConfig(
+            provider="gemini",
+            model="models/gemini-3.8-flash",
+            fallback_models=["models/gemini-3.5-flash", "gemini-3.5-flash", "models/gemini-3.8-flash"],
+        )
+    )
     assert isinstance(p_gemini, GeminiProvider)
     assert p_gemini.provider_name == "gemini"
     assert p_gemini.model_name == "gemini-3.8-flash"
+    assert p_gemini._fallback_models == ["gemini-3.5-flash"]
 
     # Ollama
     p_ollama = get_llm_provider(LLMConfig(provider="ollama", model="llama3.2"))
@@ -105,6 +112,54 @@ def test_provider_factory():
     assert isinstance(p_groq, OpenAICompatibleProvider)
     assert p_groq.provider_name == "groq"
     assert p_groq._api_base == "https://api.groq.com/openai/v1"
+
+
+def test_gemini_fallback_on_503(monkeypatch):
+    from unittest.mock import MagicMock
+    from wheatley.llm.base import LLMMessage
+
+    provider = GeminiProvider(
+        model="gemini-3.8-flash",
+        fallback_models=["gemini-3.5-flash"],
+        api_key="fake-key",
+    )
+    mock_client = MagicMock()
+    provider.client = mock_client
+
+    # First call (gemini-3.8-flash) raises 503 UNAVAILABLE; second call (gemini-3.5-flash) succeeds
+    resp_success = MagicMock()
+    resp_success.text = "Hello from fallback!"
+    resp_success.function_calls = None
+    resp_success.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=20)
+    resp_success.candidates = [MagicMock(content=MagicMock(parts=[]))]
+
+    calls = []
+    def fake_generate(model, contents, config):
+        calls.append(model)
+        if model == "gemini-3.8-flash":
+            raise RuntimeError("503 UNAVAILABLE: This model is currently experiencing high demand")
+        return resp_success
+
+    mock_client.models.generate_content.side_effect = fake_generate
+
+    resp = provider._sync_generate(
+        messages=[LLMMessage(role="user", content="hi")],
+        tools=[],
+        system_instruction="sys",
+    )
+    assert resp.content == "Hello from fallback!"
+    assert calls == ["gemini-3.8-flash", "gemini-3.5-flash"]
+
+    # Non-transient error containing "429" or "503" as part of a number/ID must NOT trigger fallback
+    from wheatley.llm.providers.gemini import _is_transient_capacity_error
+
+    assert not _is_transient_capacity_error(ValueError("400 INVALID_ARGUMENT: request_id=42910, max_tokens=5030"))
+    assert _is_transient_capacity_error(RuntimeError("429 RESOURCE_EXHAUSTED: Quota exceeded"))
+
+    class _FakeAPIError(Exception):
+        code = 503
+
+    assert _is_transient_capacity_error(_FakeAPIError("backend error"))
 
 
 # --- Usage Tracker Tests (No Billing Caps/Warnings) ---

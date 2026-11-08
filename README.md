@@ -132,8 +132,9 @@ Available both inside the LXC container and from the Proxmox host via the conven
 # Auto-discover homelab services & guests across all Proxmox nodes
 wheatley discover
 
-# Export recommended checks configuration
-wheatley discover --output /etc/wheatley/checks.yaml
+# Export recommended checks configuration (refuses to overwrite an existing file;
+# add --force / -f to overwrite with a .bak backup, or write to a separate file for review)
+wheatley discover --output /etc/wheatley/checks.discovered.yaml
 
 # Validate configuration and secrets
 wheatley config validate

@@ -14,10 +14,14 @@ import yaml as pyyaml
 from wheatley.approvals import ApprovalStore, Proposal
 from wheatley.audit import AuditLogger
 from wheatley.config import CheckConfig, ScheduleWindow
+from wheatley.tools.allowlist import is_self_guest_targeted
 from wheatley.tools.config_editor import apply_checks_file_update
 from wheatley.tools.shell import ShellExecutor
 
 logger = logging.getLogger("wheatley.orchestrator")
+
+
+_UNSET: Any = object()
 
 
 class ProposalOrchestrator:
@@ -30,12 +34,32 @@ class ProposalOrchestrator:
         shell: Optional[ShellExecutor] = None,
         check_engine: Optional[Any] = None,
         agent: Optional[Any] = None,
+        self_guest: Optional[str] = _UNSET,
     ):
         self.approvals = approvals
         self.audit = audit
         self.shell = shell
         self.check_engine = check_engine
         self.agent = agent
+        # Explicit self_guest (preferred). If not supplied, it is resolved from agent/shell config.
+        self._self_guest = self_guest
+        self._warned_self_guest_unresolved = False
+
+    def _resolve_self_guest(self, executor: Any) -> Optional[str]:
+        """Resolve Wheatley's protected self_guest, warning if no configuration source is available."""
+        if self._self_guest is not _UNSET:
+            return self._self_guest
+        for source in (self.agent, executor, self.check_engine):
+            cfg = getattr(source, "config", None)
+            if cfg is not None and hasattr(cfg, "self_guest"):
+                return cfg.self_guest
+        if not self._warned_self_guest_unresolved:
+            logger.warning(
+                "Self-guest protection unavailable: could not resolve 'self_guest' from orchestrator, "
+                "agent, shell or check engine configuration. Pass self_guest= to ProposalOrchestrator."
+            )
+            self._warned_self_guest_unresolved = True
+        return None
 
     async def schedule_service_restart(self, delay_seconds: float = 2.0) -> None:
         """Schedules a clean daemon exit after a delay so systemd (Restart=always) restarts the service."""
@@ -110,6 +134,10 @@ class ProposalOrchestrator:
 
         target = prop.target.strip()
         command = prop.command.strip()
+        self_guest = self._resolve_self_guest(executor)
+        if is_self_guest_targeted(self_guest, target, command):
+            return f"⚙️ [SYSTEM] *Execution refused:* Self-protection triggered for Wheatley's own guest (`{self_guest}`)."
+
         try:
             if "/" in target:
                 parts = target.split("/", 1)

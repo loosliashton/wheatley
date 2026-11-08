@@ -35,6 +35,8 @@ class SensorsCheck(BaseCheck):
 
         warn_temp = float(self.params.get("warn_temp_c", 80.0))
         crit_temp = float(self.params.get("crit_temp_c", 90.0))
+        min_valid = float(self.params.get("min_valid_temp_c", -40.0))
+        max_valid = float(self.params.get("max_valid_temp_c", 150.0))
 
         res = await context.shell.execute_on_host(node, "sensors -j", timeout=10)
         if not res.success or not res.stdout.strip():
@@ -55,15 +57,23 @@ class SensorsCheck(BaseCheck):
                 details={"node": node, "raw_stdout": res.stdout[:300]},
             )
 
-        # Recursively find all temperature readings
+        # Recursively find all temperature readings (*_input keys only, excluding limit/alarm fields)
         readings: List[Tuple[str, float]] = []
 
         def extract_temps(obj: Any, path: str = "") -> None:
             if isinstance(obj, dict):
                 for k, v in obj.items():
                     subpath = f"{path} > {k}" if path else k
-                    if isinstance(v, (int, float)) and ("input" in k or "temp" in k):
-                        readings.append((subpath, float(v)))
+                    is_temp_reading = (
+                        (k.endswith("_input") and "temp" in k)
+                        or (k == "input" and "temp" in path.lower())
+                    )
+                    if isinstance(v, (int, float)) and is_temp_reading:
+                        val = float(v)
+                        if min_valid <= val <= max_valid:
+                            readings.append((subpath, val))
+                        else:
+                            logger.debug("Filtered out out-of-range sensor reading: %s = %f", subpath, val)
                     else:
                         extract_temps(v, subpath)
 

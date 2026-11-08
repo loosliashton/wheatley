@@ -95,25 +95,37 @@ if pct status "$CTID" >/dev/null 2>&1 || qm status "$CTID" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Auto-determine host architecture
+if command -v dpkg >/dev/null 2>&1; then
+  HOST_ARCH="$(dpkg --print-architecture)"
+else
+  case "$(uname -m)" in
+    x86_64) HOST_ARCH="amd64" ;;
+    aarch64|arm64) HOST_ARCH="arm64" ;;
+    i386|i686) HOST_ARCH="i386" ;;
+    *) HOST_ARCH="$(uname -m)" ;;
+  esac
+fi
+
 # Auto-detect template if not provided
 if [[ -z "$TEMPLATE" ]]; then
-  echo "Detecting available Debian template on storage..."
-  # Prioritize Debian 13, then Debian 12
-  for tmpl in $(pveam list local 2>/dev/null | awk '{print $1}' | grep -E 'debian-(13|12)-standard' | sort -rV); do
+  echo "Detecting available Debian template on storage for architecture '${HOST_ARCH}'..."
+  # Prioritize Debian 13, then Debian 12 matching host architecture
+  for tmpl in $(pveam list local 2>/dev/null | awk '{print $1}' | grep -E 'debian-(13|12)-standard' | grep "_${HOST_ARCH}\." | sort -rV); do
     TEMPLATE="$tmpl"
     break
   done
 
   if [[ -z "$TEMPLATE" ]]; then
-    echo "No local Debian 12 or 13 template found. Checking downloadable templates..."
+    echo "No local Debian 12 or 13 template found for architecture '${HOST_ARCH}'. Checking downloadable templates..."
     pveam update >/dev/null 2>&1 || true
-    AVAILABLE_TMPL=$(pveam available | awk '{print $2}' | grep -E 'debian-(13|12)-standard' | sort -rV | head -n1)
+    AVAILABLE_TMPL=$(pveam available | awk '{print $2}' | grep -E 'debian-(13|12)-standard' | grep "_${HOST_ARCH}\." | sort -rV | head -n1)
     if [[ -n "$AVAILABLE_TMPL" ]]; then
       echo "Downloading template $AVAILABLE_TMPL to local..."
       pveam download local "$AVAILABLE_TMPL"
       TEMPLATE="local:vztmpl/$AVAILABLE_TMPL"
     else
-      echo "Error: Could not find or download a Debian template." >&2
+      echo "Error: Could not find or download a Debian template for architecture '${HOST_ARCH}'." >&2
       exit 1
     fi
   fi
@@ -208,8 +220,20 @@ if [[ "$START" == "true" ]]; then
     chown -R wheatley:wheatley /opt/wheatley
     git config --system --add safe.directory /opt/wheatley || true
     su -s /bin/bash wheatley -c "python3 -m venv /opt/wheatley/venv && /opt/wheatley/venv/bin/pip install --upgrade pip && /opt/wheatley/venv/bin/pip install -e /opt/wheatley"
-    ln -sf /opt/wheatley/venv/bin/wheatley /usr/local/bin/wheatley
-    ln -sf /opt/wheatley/venv/bin/wheatley /usr/bin/wheatley
+    # Install container-side wrapper ensuring CLI commands run as wheatley user even if invoked as root.
+    # NOTE: this block is inside a single-quoted bash -c string, so the heredoc delimiter must be
+    # double-quoted (single quotes would terminate the outer string and $EUID/"$@" would be expanded).
+    cat <<"WRAPPER_EOF" > /usr/local/bin/wheatley
+#!/usr/bin/env bash
+if [[ $EUID -eq 0 ]]; then
+  exec runuser -u wheatley -- /opt/wheatley/venv/bin/wheatley "$@"
+else
+  exec /opt/wheatley/venv/bin/wheatley "$@"
+fi
+WRAPPER_EOF
+    chmod 755 /usr/local/bin/wheatley
+    ln -sf /usr/local/bin/wheatley /usr/bin/wheatley
+    chown -R wheatley:wheatley /var/lib/wheatley
 
     # Seed configuration templates if not already present
     if [[ ! -f /etc/wheatley/config.yaml && -f /opt/wheatley/config.example.yaml ]]; then
@@ -227,6 +251,15 @@ if [[ "$START" == "true" ]]; then
       chown wheatley:wheatley /etc/wheatley/secrets.env
       chmod 600 /etc/wheatley/secrets.env
     fi
+    # Ensure a random webhook secret exists (fresh installs and upgrades of older secrets.env files)
+    if [[ -f /etc/wheatley/secrets.env ]]; then
+      RAND_WEBHOOK_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(24))" 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n")
+      if grep -q "^WEBHOOK_SECRET_TOKEN=" /etc/wheatley/secrets.env; then
+        sed -i "s/^WEBHOOK_SECRET_TOKEN=\"\{0,1\}\(change-me-to-a-random-secret-string\)\{0,1\}\"\{0,1\}$/WEBHOOK_SECRET_TOKEN=\"${RAND_WEBHOOK_TOKEN}\"/" /etc/wheatley/secrets.env
+      else
+        printf "\n# Webhook receiver shared secret (auto-generated)\nWEBHOOK_SECRET_TOKEN=\"%s\"\n" "$RAND_WEBHOOK_TOKEN" >> /etc/wheatley/secrets.env
+      fi
+    fi
 
     # Install systemd service unit
     if [[ -f /opt/wheatley/deploy/wheatley.service ]]; then
@@ -241,16 +274,45 @@ if [[ "$START" == "true" ]]; then
 
   PUBKEY=$(pct exec "$CTID" -- cat /var/lib/wheatley/.ssh/id_ed25519.pub 2>/dev/null || true)
 
-  # Authorize SSH key on local Proxmox host if wheatley user exists
+  # Authorize SSH key on local Proxmox host if wheatley user exists (with forwarding and PTY disabled).
+  # Any existing entry for the same key (e.g. an unrestricted line from an older install) is replaced.
   if [[ -n "$PUBKEY" ]] && id -u wheatley >/dev/null 2>&1; then
+    SSH_KEY_OPTS="no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
+    KEY_BLOB=$(printf '%s\n' "$PUBKEY" | awk '{print $2}')
+    AK_FILE="/home/wheatley/.ssh/authorized_keys"
     mkdir -p /home/wheatley/.ssh
     chmod 700 /home/wheatley/.ssh
-    if ! grep -Fxq "$PUBKEY" /home/wheatley/.ssh/authorized_keys 2>/dev/null; then
-      echo "$PUBKEY" >> /home/wheatley/.ssh/authorized_keys
+    touch "$AK_FILE"
+    AK_TMP=$(mktemp "${AK_FILE}.XXXXXX")
+    if [[ -n "$KEY_BLOB" ]]; then
+      grep -vF -- "$KEY_BLOB" "$AK_FILE" > "$AK_TMP" || true
+    else
+      cat "$AK_FILE" > "$AK_TMP"
     fi
-    chmod 600 /home/wheatley/.ssh/authorized_keys
+    printf '%s %s\n' "$SSH_KEY_OPTS" "$PUBKEY" >> "$AK_TMP"
+    mv "$AK_TMP" "$AK_FILE"
+    chmod 600 "$AK_FILE"
     chown -R wheatley:wheatley /home/wheatley/.ssh
     echo "Authorized CT $CTID SSH key for user 'wheatley' on local Proxmox host."
+  fi
+
+  # Install host-side convenience wrapper to access Wheatley CLI from the Proxmox host.
+  # Never overwrite an unrelated /usr/local/bin/wheatley; only (re)write our own wrapper.
+  HOST_WRAPPER="/usr/local/bin/wheatley"
+  HOST_WRAPPER_MARKER="# wheatley-host-cli-wrapper"
+  if [[ -e "$HOST_WRAPPER" ]] && ! grep -qF "$HOST_WRAPPER_MARKER" "$HOST_WRAPPER" 2>/dev/null; then
+    echo "Note: $HOST_WRAPPER already exists and was not created by this script; leaving it untouched."
+    echo "      Use 'pct exec ${CTID} -- wheatley <cmd>' to run the CLI from the host."
+  else
+    cat <<HOST_WRAPPER_EOF > "$HOST_WRAPPER"
+#!/usr/bin/env bash
+${HOST_WRAPPER_MARKER}
+# Forwards Wheatley CLI commands into the Wheatley container.
+# Override the target container with WHEATLEY_CTID=<id> if needed.
+exec pct exec "\${WHEATLEY_CTID:-${CTID}}" -- /usr/local/bin/wheatley "\$@"
+HOST_WRAPPER_EOF
+    chmod 755 "$HOST_WRAPPER"
+    echo "Installed host CLI convenience wrapper at $HOST_WRAPPER (forwards to CT ${CTID})."
   fi
 
   echo ""
@@ -266,9 +328,10 @@ if [[ "$START" == "true" ]]; then
     echo "  ./install/host-setup.sh --node-index 2 --ssh-key \"$PUBKEY\""
     echo ""
   fi
-  echo "Next steps (run 'pct enter $CTID'):"
+  echo "Next steps (run from host via 'wheatley <cmd>' or inside CT via 'pct enter $CTID'):"
   echo "  1. Edit /etc/wheatley/secrets.env and /etc/wheatley/config.yaml"
   echo "  2. Auto-discover checks: wheatley discover --output /etc/wheatley/checks.yaml"
+  echo "     (or review first: wheatley discover --output /etc/wheatley/checks.discovered.yaml)"
   echo "  3. Validate & start:     wheatley config validate && systemctl start wheatley"
   echo "================================================="
 fi

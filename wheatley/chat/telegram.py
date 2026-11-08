@@ -1124,12 +1124,17 @@ class TelegramBot(ChatInterface):
             return None
 
         if proposal_type == "ALLOWLIST_RULE":
+            from wheatley.tools.allowlist import validate_proposed_pattern
+
+            can_always_allow = bool(pattern and validate_proposed_pattern(pattern)[0])
+            row1 = [InlineKeyboardButton("⚡ Run Once", callback_data=f"allow_once:{proposal_id}")]
+            if can_always_allow:
+                row1.append(
+                    InlineKeyboardButton(f"🛡 Always Allow on {target}", callback_data=f"allow_always:{proposal_id}")
+                )
             keyboard = InlineKeyboardMarkup(
                 [
-                    [
-                        InlineKeyboardButton("⚡ Run Once", callback_data=f"allow_once:{proposal_id}"),
-                        InlineKeyboardButton(f"🛡 Always Allow on {target}", callback_data=f"allow_always:{proposal_id}"),
-                    ],
+                    row1,
                     [
                         InlineKeyboardButton("❌ Deny", callback_data=f"deny:{proposal_id}"),
                     ],

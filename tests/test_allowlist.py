@@ -193,7 +193,31 @@ def test_validate_proposed_pattern():
         "smartctl *",  # binary without subcommand + wildcard
         "smartctl -a * *",  # multiple wildcards
         "smartctl -a *; rm -rf /",  # operator
+        "pct stop *",
+        "pct exec *",
+        "qm stop *",
+        "qm guest *",
+        "pvesh create *",
+        "reboot",
+        "shutdown -h now",
     ]
     for pat in invalid_patterns:
         ok, reason = validate_proposed_pattern(pat)
         assert not ok, f"Pattern '{pat}' must be rejected!"
+
+
+def test_is_self_guest_targeted():
+    from wheatley.tools.allowlist import is_self_guest_targeted
+
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01/110", "systemctl stop wheatley")
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct stop 110")
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01", "sudo /usr/sbin/pct restart 110")
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01", "qm guest exec 110 -- ls")
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01", "lxc-stop -n 110")
+    assert is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pvesh create /nodes/pve-node-01/lxc/110/status/stop")
+    assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct stop 105")
+    assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01/105", "systemctl restart nginx")
+    # False-positive regression checks: VMID substring inside an IP, larger VMID, or command inside another guest
+    assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct exec 105 -- ping 10.0.0.110")
+    assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct stop 1100")
+    assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct exec 105 -- sleep 110")

@@ -257,3 +257,57 @@ async def test_sensors_check(mock_context):
     res = await check.run(mock_context)
     assert res.status == CheckStatus.OK
     assert "Peak: 50.0°C" in res.summary
+
+
+@pytest.mark.asyncio
+async def test_sensors_check_ignores_limits_and_sentinels(mock_context):
+    check = SensorsCheck(
+        id="sensors-test",
+        type="sensors",
+        params={"node": "pve-node-01", "warn_temp_c": 75, "crit_temp_c": 85},
+    )
+
+    # Real-world sensors -j snippet with temp limits (80, 100), sentinel limit (65261.85),
+    # fan inputs, and voltage inputs that previously caused false CRIT
+    sensors_json = {
+        "coretemp-isa-0000": {
+            "Package id 0": {
+                "temp1_input": 55.0,
+                "temp1_max": 80.0,
+                "temp1_crit": 100.0,
+                "temp1_crit_alarm": 0.0,
+            },
+            "Core 0": {
+                "temp2_input": 52.0,
+                "temp2_max": 80.0,
+                "temp2_crit": 100.0,
+                "temp2_crit_alarm": 0.0,
+            },
+        },
+        "nvme-pci-0100": {
+            "Composite": {
+                "temp1_input": 45.0,
+                "temp1_max": 85.0,
+                "temp1_crit": 90.0,
+            },
+            "Sensor 1": {
+                "temp2_input": 48.0,
+                "temp2_max": 65261.85,  # Sentinel limit
+                "temp2_min": -273.15,
+            },
+        },
+        "nct6779-isa-0290": {
+            "fan1": {"fan1_input": 1200.0},
+            "in0": {"in0_input": 1.2},
+        },
+    }
+    mock_context.shell.execute_on_host = AsyncMock(
+        return_value=ShellResult(command="sensors -j", exit_code=0, stdout=json.dumps(sensors_json), stderr="")
+    )
+
+    res = await check.run(mock_context)
+    # Even though temp1_crit is 100.0 (>= crit 85) and temp2_max is 65261.85,
+    # the check must ignore limits and report OK with peak 55.0°C!
+    assert res.status == CheckStatus.OK
+    assert "Peak: 55.0°C" in res.summary
+    assert res.details["max_temp_c"] == 55.0

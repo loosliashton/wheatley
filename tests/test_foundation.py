@@ -64,3 +64,14 @@ chat:
     assert config.chat.telegram is not None
     assert config.chat.telegram.bot_token == "123456:ABC-DEF"
     assert config.chat.telegram.allowed_user_ids == [987654321]
+
+
+def test_telegram_invalid_user_id_raises():
+    import pytest
+    from wheatley.config import TelegramConfig
+
+    with pytest.raises(ValueError, match="Invalid Telegram user ID '@myusername'"):
+        TelegramConfig(bot_token="123:abc", allowed_user_ids=["@myusername"])
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        TelegramConfig(bot_token="123:abc", allowed_user_ids=[])

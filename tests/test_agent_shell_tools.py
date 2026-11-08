@@ -222,3 +222,35 @@ async def test_chat_defers_proposals_until_drained(mock_agent):
     # Pending proposals is now empty
     assert len(mock_agent.drain_pending_proposals()) == 0
 
+
+@pytest.mark.asyncio
+async def test_self_guest_protection_blocks_host_and_guest_bypasses(mock_agent):
+    mock_agent.config.self_guest = "pve-node-01/110"
+
+    # 1. propose_action targeting host with pct stop 110 is refused
+    res1 = mock_agent._tool_propose_action("pve-node-01", "pct stop 110", "Stop container 110", "HIGH")
+    assert res1["status"] == "REFUSED"
+    assert "Self-protection" in res1["reason"]
+
+    # 2. run_host_command with pct restart 110 is refused instead of creating a proposal
+    res2 = await mock_agent._tool_run_host_command("pve-node-01", "pct restart 110")
+    assert res2["status"] == "REFUSED"
+    assert "Self-protection" in res2["reason"]
+
+    # 3. run_guest_command on self_guest with mutating command is refused
+    res3 = await mock_agent._tool_run_guest_command("pve-node-01", 110, "systemctl stop wheatley")
+    assert res3["status"] == "REFUSED"
+    assert "Self-protection" in res3["reason"]
+
+
+@pytest.mark.asyncio
+async def test_mutating_command_does_not_generate_allowlist_pattern(mock_agent):
+    mock_agent.shell.execute_on_host = AsyncMock()
+
+    with pytest.raises(CommandExecutionHalted) as excinfo:
+        await mock_agent._tool_run_host_command("pve-node-01", "pct stop 105")
+    prop = excinfo.value.proposal
+    assert prop.pattern is None
+    ok, msg = mock_agent.approvals.resolve_proposal(prop.id, "ALLOW_ALWAYS", user_id=123)
+    assert ok is False
+

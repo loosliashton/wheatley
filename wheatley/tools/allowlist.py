@@ -165,6 +165,62 @@ FORBIDDEN_ARGUMENTS: Dict[str, Set[str]] = {
         "trim",
         "scrub",
     },
+    "pct": {
+        "create",
+        "destroy",
+        "start",
+        "stop",
+        "restart",
+        "reboot",
+        "shutdown",
+        "suspend",
+        "resume",
+        "exec",
+        "enter",
+        "console",
+        "set",
+        "resize",
+        "migrate",
+        "restore",
+        "clone",
+        "template",
+        "delsnapshot",
+        "rollback",
+        "unlock",
+        "move-disk",
+        "push",
+        "pull",
+        "mount",
+        "unmount",
+    },
+    "qm": {
+        "create",
+        "destroy",
+        "start",
+        "stop",
+        "restart",
+        "reboot",
+        "shutdown",
+        "reset",
+        "suspend",
+        "resume",
+        "guest",
+        "terminal",
+        "monitor",
+        "set",
+        "resize",
+        "migrate",
+        "restore",
+        "clone",
+        "template",
+        "delsnapshot",
+        "rollback",
+        "unlock",
+        "move-disk",
+        "unlink",
+        "importdisk",
+    },
+    "pvesh": {"create", "set", "delete"},
 }
 
 DISALLOWED_PATTERN_BINARIES = {
@@ -197,6 +253,28 @@ DISALLOWED_PATTERN_BINARIES = {
     "pkill",
     "sudo",
     "su",
+    "pct",
+    "qm",
+    "pvesh",
+    "pveum",
+    "reboot",
+    "shutdown",
+    "poweroff",
+    "halt",
+    "mount",
+    "umount",
+    "iptables",
+    "nft",
+    "ufw",
+    "useradd",
+    "userdel",
+    "usermod",
+    "passwd",
+    "visudo",
+    "crontab",
+    "apt",
+    "apt-get",
+    "dpkg",
 }
 
 
@@ -357,3 +435,36 @@ def validate_proposed_pattern(pattern: str) -> Tuple[bool, str]:
         return False, f"Pattern '{pattern}' is too broad; must include a specific subcommand (e.g. '{base_bin} status*')"
 
     return True, "Valid pattern"
+
+
+def is_self_guest_targeted(
+    self_guest: Optional[str], target: str, command: str = ""
+) -> bool:
+    """Return True if a command or target directly addresses Wheatley's protected self_guest."""
+    if not self_guest or "/" not in self_guest:
+        return False
+
+    self_spec = self_guest.strip()
+    self_node, self_vmid = self_spec.split("/", 1)
+    target_clean = target.strip()
+
+    if target_clean == self_spec:
+        return True
+
+    if target_clean == self_node or "/" not in target_clean:
+        cmd_clean = command.strip()
+        if cmd_clean:
+            vmid_esc = re.escape(self_vmid)
+            # VMID must be a whole token (not part of an IP like 10.0.0.110 or a larger number)
+            vmid_tok = rf"(?<![\w.:/-]){vmid_esc}(?![\w.:-])"
+            # pct/qm <subcommand> [guest-subcommand] <vmid>  (e.g. 'pct stop 110', 'qm guest exec 110')
+            if re.search(rf"\b(?:pct|qm)\s+(?:guest\s+)?[a-z][a-z-]*\s+{vmid_tok}", cmd_clean):
+                return True
+            # lxc-* tools addressing the container by name (e.g. 'lxc-stop -n 110')
+            if re.search(rf"\blxc-[a-z]+\b[^\n;|]*?(?:-n|--name)(?:\s+|=){vmid_tok}", cmd_clean):
+                return True
+            # API paths (e.g. 'pvesh create /nodes/pve1/lxc/110/status/stop')
+            if re.search(rf"/(?:lxc|qemu)/{vmid_esc}(?![\w.-])", cmd_clean):
+                return True
+
+    return False

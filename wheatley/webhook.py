@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hmac
 import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, Optional
@@ -12,6 +13,13 @@ from wheatley.audit import AuditLogger
 from wheatley.config import WebhookConfig
 
 logger = logging.getLogger("wheatley.webhook")
+
+INSECURE_DEFAULT_WEBHOOK_TOKENS = {
+    "",
+    "change-me-to-a-random-secret-string",
+    "changeme",
+    "secret",
+}
 
 
 class WebhookServer:
@@ -44,23 +52,33 @@ class WebhookServer:
             self.app.router.add_post("/webhook/pve", self._handle_pve)
             self.app.router.add_post("/webhook/generic", self._handle_generic)
 
+    def _has_valid_secret(self) -> bool:
+        token = (self.config.secret_token or "").strip()
+        return bool(token and token not in INSECURE_DEFAULT_WEBHOOK_TOKENS)
+
     def _is_authorized(self, request: web.Request) -> bool:
-        if not self.config.secret_token:
-            return True
+        if not self._has_valid_secret():
+            logger.warning(
+                "Rejecting webhook request from %s: webhook.secret_token is unset or uses an insecure placeholder",
+                request.remote,
+            )
+            return False
+
+        expected = (self.config.secret_token or "").strip()
 
         # Check Bearer token or custom header or query param
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-            if token == self.config.secret_token:
+            if hmac.compare_digest(token, expected):
                 return True
 
         header_token = request.headers.get("X-Wheatley-Token", "")
-        if header_token == self.config.secret_token:
+        if header_token and hmac.compare_digest(header_token, expected):
             return True
 
         query_token = request.query.get("token", "")
-        if query_token == self.config.secret_token:
+        if query_token and hmac.compare_digest(query_token, expected):
             return True
 
         return False
@@ -188,6 +206,11 @@ class WebhookServer:
         self.site = web.TCPSite(self.runner, self.config.host, self.config.port)
         await self.site.start()
         logger.info("Webhook server listening on http://%s:%d", self.config.host, self.config.port)
+        if self.serve_webhooks and not self._has_valid_secret():
+            logger.warning(
+                "WEBHOOK_SECRET_TOKEN is unset or uses the default placeholder; "
+                "incoming POSTs to /webhook/* will be rejected (401) until a secret token is set in secrets.env."
+            )
 
     async def stop(self) -> None:
         """Stop the async webhook server."""

@@ -22,6 +22,12 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+# Ensure sudo/visudo is installed (Proxmox VE minimal installs do not include sudo by default)
+if ! command -v visudo >/dev/null 2>&1; then
+  echo "Prerequisite 'sudo' not found. Installing via apt-get..."
+  apt-get update -y && apt-get install -y --no-install-recommends sudo
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOKEN_NAME="bot"
 SSH_KEY=""
@@ -79,6 +85,7 @@ TOKEN_OUTPUT=$(pveum user token add wheatley@pve "$TOKEN_NAME" --privsep 0 --out
 SECRET_VALUE=""
 if echo "$TOKEN_OUTPUT" | grep -q '"value"'; then
   SECRET_VALUE=$(echo "$TOKEN_OUTPUT" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
+  echo "API token secret generated. It is printed once in the summary below; save it now (Proxmox cannot display it again)."
 else
   echo "Note: Token already exists or secret was not returned."
   echo "To regenerate: pveum user token delete wheatley@pve $TOKEN_NAME && $0"
@@ -94,14 +101,136 @@ RESTRICTED_SHELL="/usr/local/bin/wheatley-shell"
 if [[ -f "${SCRIPT_DIR}/wheatley-shell" ]]; then
   install -m 755 "${SCRIPT_DIR}/wheatley-shell" "$RESTRICTED_SHELL"
 else
+  # Fallback for standalone use of this script. MUST stay byte-identical to
+  # install/wheatley-shell.
   cat <<'EOF' > "$RESTRICTED_SHELL"
 #!/usr/bin/env bash
+# ==============================================================================
+# Wheatley Non-Interactive SSH Shell Wrapper
+# Installed on Proxmox VE hosts as the login shell of the 'wheatley' SSH user.
+#
+# What this wrapper enforces:
+# - Interactive login sessions are disabled (a command must be supplied).
+# - Multiline commands are rejected.
+# - Guest exec commands must match the exact form Wheatley generates:
+#     sudo /usr/sbin/pct exec <vmid> -- /bin/bash -c <one shell word>
+#     sudo /usr/sbin/qm guest exec <vmid> -- /bin/bash -c <one shell word>
+#   where <one shell word> is a shlex.quote()-style argument. Nothing may follow it.
+# - Direct host commands may use pipes and redirections, but command chaining
+#   (';', '&&', '||', background '&'), command/process substitution ('$(...)',
+#   backticks, '<(...)', '>(...)') and ANSI-C quoting ($'...') are rejected.
+#   Quoting is taken into account, so e.g. awk '$3 > 0' is permitted.
+#
+# What this wrapper does NOT do:
+# - It is not a privilege boundary and does not restrict which programs the
+#   (unprivileged) 'wheatley' user can run. Root-level capabilities on the host
+#   are governed exclusively by /etc/sudoers.d/wheatley, and which commands
+#   Wheatley may run without approval is governed by its application allowlist.
+# ==============================================================================
 set -euo pipefail
-if [[ -z "${SSH_ORIGINAL_COMMAND:-}" ]]; then
-  echo "Wheatley shell: interactive shell sessions are disabled." >&2
-  exit 1
+
+CMD=""
+if [[ -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+  CMD="$SSH_ORIGINAL_COMMAND"
+elif [[ $# -ge 2 && "$1" == "-c" ]]; then
+  CMD="$2"
 fi
-exec /bin/bash -c "$SSH_ORIGINAL_COMMAND"
+
+deny() {
+  echo "Wheatley shell: $1" >&2
+  exit 1
+}
+
+if [[ -z "$CMD" ]]; then
+  deny "interactive shell sessions are disabled."
+fi
+
+# Reject multiline commands and NUL-like control characters
+if [[ "$CMD" == *$'\n'* || "$CMD" == *$'\r'* ]]; then
+  deny "multiline commands are prohibited."
+fi
+
+# --- Guest exec form ----------------------------------------------------------
+# A single shell word as produced by Python's shlex.quote(): either a run of
+# "safe" characters, or a concatenation of '...' segments and "'" escapes.
+SAFE_WORD="[A-Za-z0-9_@%+=:,./-]+"
+QUOTED_WORD="('[^']*'|\"'\")+"
+GUEST_PREFIX="^sudo[[:space:]]+/usr/sbin/(pct[[:space:]]+exec|qm[[:space:]]+guest[[:space:]]+exec)[[:space:]]+"
+GUEST_STRICT="${GUEST_PREFIX}[0-9]+[[:space:]]+--[[:space:]]+/bin/bash[[:space:]]+-c[[:space:]]+(${SAFE_WORD}|${QUOTED_WORD})[[:space:]]*$"
+
+if [[ "$CMD" =~ $GUEST_STRICT ]]; then
+  # The quoted payload runs inside the guest; it is a single argument to bash -c
+  # in the guest and cannot affect the host shell.
+  exec /bin/bash -c "$CMD"
+fi
+
+if [[ "$CMD" =~ $GUEST_PREFIX ]]; then
+  deny "malformed guest exec command (expected: sudo /usr/sbin/{pct exec|qm guest exec} <vmid> -- /bin/bash -c <single quoted argument>)."
+fi
+
+# --- Direct host commands -------------------------------------------------------
+# Defense-in-depth only: sudoers does not permit these anyway.
+if [[ "$CMD" =~ (^|[[:space:]|])(sudo[[:space:]]+)?(/usr/sbin/)?(pct|qm)[[:space:]]+destroy([[:space:]]|$) ]]; then
+  deny "guest destruction (pct/qm destroy) is prohibited."
+fi
+if [[ "$CMD" =~ (^|[[:space:]|])sudo[[:space:]]+(-i|-s|su|bash|sh|/bin/bash|/bin/sh)([[:space:]]|$) ]]; then
+  deny "interactive root shell escalation is prohibited."
+fi
+
+# Quote-aware scan for chaining and substitution outside of single quotes.
+# Returns 0 if the command is acceptable, 1 otherwise.
+check_host_syntax() {
+  local s="$1" len=${#1} i c next prev="" sq=0 dq=0
+  for ((i = 0; i < len; i++)); do
+    c="${s:i:1}"
+    next="${s:i+1:1}"
+    if ((sq)); then
+      [[ "$c" == "'" ]] && sq=0
+      prev="$c"
+      continue
+    fi
+    if [[ "$c" == "\\" ]]; then
+      # Skip the escaped character (both unquoted and inside double quotes)
+      i=$((i + 1))
+      prev=""
+      continue
+    fi
+    if ((dq)); then
+      case "$c" in
+        '"') dq=0 ;;
+        '`') return 1 ;;
+        '$') [[ "$next" == "(" ]] && return 1 ;;
+      esac
+      prev="$c"
+      continue
+    fi
+    case "$c" in
+      "'") sq=1 ;;
+      '"') dq=1 ;;
+      ';' | '`') return 1 ;;
+      '$') [[ "$next" == "(" || "$next" == "'" ]] && return 1 ;;
+      '|') [[ "$next" == "|" ]] && return 1 ;;
+      '<' | '>') [[ "$next" == "(" ]] && return 1 ;;
+      '&')
+        [[ "$next" == "&" ]] && return 1
+        # Permit redirection forms only: >&N, <&N, &>file
+        if [[ "$prev" != ">" && "$prev" != "<" && "$next" != ">" ]]; then
+          return 1
+        fi
+        ;;
+    esac
+    prev="$c"
+  done
+  ((sq || dq)) && return 1
+  return 0
+}
+
+if ! check_host_syntax "$CMD"; then
+  deny "command chaining (; && || &), command/process substitution, ANSI-C quoting, and unbalanced quotes are prohibited on host."
+fi
+
+# Execute the validated non-interactive command
+exec /bin/bash -c "$CMD"
 EOF
   chmod 755 "$RESTRICTED_SHELL"
 fi
@@ -123,16 +252,35 @@ if [[ -z "$SSH_KEY" ]] && command -v pct >/dev/null 2>&1 && pct status 110 >/dev
   SSH_KEY=$(pct exec 110 -- cat /var/lib/wheatley/.ssh/id_ed25519.pub 2>/dev/null || true)
 fi
 
-# Set up SSH authorized keys if provided
-if [[ -n "$SSH_KEY" ]]; then
+# Set up SSH authorized keys if provided (with forwarding and PTY disabled).
+# Any existing entry for the same key (e.g. an unrestricted line from an older
+# install) is replaced so upgrades also receive the restrictions.
+install_restricted_key() {
+  local key="$1"
+  local ak="/home/wheatley/.ssh/authorized_keys"
+  local opts="no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
+  local key_part blob tmp
+  key_part=$(printf '%s\n' "$key" | grep -oE '(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/=]+( .*)?$' | head -n1 || true)
+  if [[ -z "$key_part" ]]; then
+    echo "Warning: could not parse SSH public key '${key}'; skipping authorized_keys setup." >&2
+    return 1
+  fi
+  blob=$(printf '%s\n' "$key_part" | awk '{print $2}')
   mkdir -p /home/wheatley/.ssh
   chmod 700 /home/wheatley/.ssh
-  if ! grep -Fxq "$SSH_KEY" /home/wheatley/.ssh/authorized_keys 2>/dev/null; then
-    echo "$SSH_KEY" >> /home/wheatley/.ssh/authorized_keys
-  fi
-  chmod 600 /home/wheatley/.ssh/authorized_keys
+  touch "$ak"
+  tmp=$(mktemp "${ak}.XXXXXX")
+  grep -vF -- "$blob" "$ak" > "$tmp" || true
+  printf '%s %s\n' "$opts" "$key_part" >> "$tmp"
+  mv "$tmp" "$ak"
+  chmod 600 "$ak"
   chown -R wheatley:wheatley /home/wheatley/.ssh
-  echo "Installed SSH authorized key for 'wheatley'."
+}
+
+if [[ -n "$SSH_KEY" ]]; then
+  if install_restricted_key "$SSH_KEY"; then
+    echo "Installed SSH authorized key for 'wheatley' (port/agent/X11 forwarding and PTY disabled)."
+  fi
 fi
 
 # 5. Configure narrow sudoers rules

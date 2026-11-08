@@ -26,11 +26,30 @@ def interpolate_env_vars(raw: str) -> str:
     return ENV_VAR_PATTERN.sub(replacer, raw)
 
 
+def normalize_model_name(name: Any) -> str:
+    """Strip whitespace and an optional leading 'models/' prefix from an LLM model name."""
+    s = str(name).strip() if name is not None else ""
+    if s.startswith("models/"):
+        s = s[len("models/"):]
+    return s
+
+
+def normalize_model_list(names: Any, exclude: Optional[str] = None) -> List[str]:
+    """Normalize a list of model names, dropping empties, duplicates and the optional excluded model."""
+    res: List[str] = []
+    for m in names or []:
+        s = normalize_model_name(m)
+        if s and s != exclude and s not in res:
+            res.append(s)
+    return res
+
+
 class NodeSshConfig(BaseModel):
     host: str
     port: int = 22
     user: str = "wheatley"
     key_path: Optional[str] = None
+    known_hosts_path: Optional[str] = None
 
 
 class NodeTokensConfig(BaseModel):
@@ -55,6 +74,10 @@ class LLMConfig(BaseModel):
         default="gemini-3.8-flash",
         description="Model name (e.g. 'gemini-3.8-flash', 'llama3.2', 'gpt-4o-mini')",
     )
+    fallback_models: List[str] = Field(
+        default_factory=list,
+        description="Optional fallback models attempted if the primary model returns 503 or 429",
+    )
     api_key: Optional[str] = Field(
         None,
         description="API Key (can also be supplied via GEMINI_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY env vars)",
@@ -72,6 +95,18 @@ class LLMConfig(BaseModel):
         description="Inactivity timeout in minutes after which conversation context auto-resets (0 to disable)",
     )
     max_tool_result_chars: int = Field(4000, description="Max characters for a single tool result before truncation")
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def normalize_model(cls, v: Any) -> str:
+        return normalize_model_name(v) or "gemini-3.8-flash"
+
+    @field_validator("fallback_models", mode="before")
+    @classmethod
+    def normalize_fallback_models(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            v = v.split(",")
+        return normalize_model_list(v or [])
 
     @model_validator(mode="before")
     @classmethod
@@ -91,13 +126,25 @@ class TelegramConfig(BaseModel):
     def parse_user_ids(cls, v: Any) -> List[int]:
         if isinstance(v, (int, str)):
             v = [v]
-        res = []
+        res: List[int] = []
         for item in (v or []):
-            if item is not None and str(item).strip():
-                try:
-                    res.append(int(item))
-                except ValueError:
-                    pass
+            if item is None:
+                continue
+            item_str = str(item).strip()
+            if not item_str:
+                continue
+            try:
+                res.append(int(item_str))
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid Telegram user ID '{item}'. Telegram user IDs must be numeric integers "
+                    "(obtain yours from @userinfobot)."
+                )
+        if not res:
+            raise ValueError(
+                "Telegram 'allowed_user_ids' cannot be empty. At least one numeric Telegram user ID "
+                "is required to authenticate commands (obtain yours from @userinfobot)."
+            )
         return res
 
 

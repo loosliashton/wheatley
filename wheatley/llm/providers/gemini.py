@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, List, Optional
 
 try:
@@ -15,9 +16,38 @@ except ImportError:
     GENAI_AVAILABLE = False
     types = None  # type: ignore
 
+from wheatley.config import normalize_model_list, normalize_model_name
 from wheatley.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, ToolCall, ToolDefinition
 
 logger = logging.getLogger("wheatley.llm.gemini")
+
+_TRANSIENT_HTTP_CODES = {429, 503}
+_TRANSIENT_STATUS_NAMES = {"UNAVAILABLE", "RESOURCE_EXHAUSTED"}
+_TRANSIENT_MSG_RE = re.compile(
+    r"(?:\b(?:429|503)\b\s*(?:UNAVAILABLE|RESOURCE_EXHAUSTED|Too Many Requests|Service Unavailable)"
+    r"|\b(?:UNAVAILABLE|RESOURCE_EXHAUSTED)\b"
+    r"|currently experiencing high demand"
+    r"|model is overloaded"
+    r"|quota exceeded"
+    r"|rate limit)",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_capacity_error(exc: BaseException) -> bool:
+    """Return True if *exc* represents a transient 429/503 capacity or rate-limit error."""
+    for attr in ("code", "status_code", "http_status"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int) and val in _TRANSIENT_HTTP_CODES:
+            return True
+        if isinstance(val, str):
+            val_upper = val.strip().upper()
+            if val_upper in _TRANSIENT_STATUS_NAMES or val_upper in {"429", "503"}:
+                return True
+    status_val = getattr(exc, "status", None)
+    if isinstance(status_val, str) and status_val.strip().upper() in _TRANSIENT_STATUS_NAMES:
+        return True
+    return bool(_TRANSIENT_MSG_RE.search(str(exc)))
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -26,10 +56,12 @@ class GeminiProvider(BaseLLMProvider):
     def __init__(
         self,
         model: str = "gemini-3.8-flash",
+        fallback_models: Optional[List[str]] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.2,
     ):
-        self._model = model or "gemini-3.8-flash"
+        self._model = normalize_model_name(model or "gemini-3.8-flash") or "gemini-3.8-flash"
+        self._fallback_models = normalize_model_list(fallback_models or [], exclude=self._model)
         self._temperature = temperature
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
         self.client: Optional[Any] = None
@@ -37,7 +69,8 @@ class GeminiProvider(BaseLLMProvider):
         if GENAI_AVAILABLE and self._api_key and "xxxx" not in self._api_key:
             try:
                 self.client = genai.Client(api_key=self._api_key)
-                logger.info("Gemini provider initialized with model '%s'", self._model)
+                fallbacks_note = f" (fallbacks: {self._fallback_models})" if self._fallback_models else ""
+                logger.info("Gemini provider initialized with model '%s'%s", self._model, fallbacks_note)
             except Exception as e:
                 logger.warning("Could not initialize Google GenAI Client: %s", e)
 
@@ -147,15 +180,31 @@ class GeminiProvider(BaseLLMProvider):
             temperature=self._temperature,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=self._model,
-                contents=gemini_contents,
-                config=config,
-            )
-        except Exception as e:
-            logger.exception("Gemini API call failed: %s", e)
-            raise
+        models_to_try = [self._model] + self._fallback_models
+        response = None
+
+        for idx, current_model in enumerate(models_to_try):
+            try:
+                response = self.client.models.generate_content(
+                    model=current_model,
+                    contents=gemini_contents,
+                    config=config,
+                )
+                if current_model != self._model:
+                    logger.info("Successfully received Gemini response using fallback model '%s'", current_model)
+                break
+            except Exception as e:
+                if _is_transient_capacity_error(e) and idx + 1 < len(models_to_try):
+                    next_model = models_to_try[idx + 1]
+                    logger.warning(
+                        "Gemini model '%s' returned capacity error (%s); falling back to '%s'",
+                        current_model,
+                        e,
+                        next_model,
+                    )
+                    continue
+                logger.exception("Gemini API call failed for model '%s': %s", current_model, e)
+                raise
 
         if not response:
             raise RuntimeError("No response from Gemini API.")

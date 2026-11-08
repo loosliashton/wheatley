@@ -81,3 +81,36 @@ async def test_webhook_pve_flow(tmp_path):
         assert len(alerts) == 2  # Still 2, no new alert
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_empty_or_placeholder_secret(tmp_path):
+    db_path = str(tmp_path / "test_webhook_unauth.db")
+    audit = AuditLogger(db_path)
+
+    for bad_token in (None, "", "change-me-to-a-random-secret-string"):
+        config = WebhookConfig(enabled=True, host="127.0.0.1", port=8088, secret_token=bad_token)
+        server = WebhookServer(config, audit)
+        test_server = TestServer(server.app)
+        client = TestClient(test_server)
+        await client.start_server()
+        try:
+            # /health remains accessible
+            h_resp = await client.get("/health")
+            assert h_resp.status == 200
+
+            # /webhook/pve and /webhook/generic are rejected even if caller passes the placeholder
+            headers = {"Authorization": f"Bearer {bad_token}"} if bad_token else {}
+            pve_resp = await client.post("/webhook/pve", json={"title": "spoof"}, headers=headers)
+            assert pve_resp.status == 401
+
+            gen_resp = await client.post("/webhook/generic", json={"alert": True}, headers=headers)
+            assert gen_resp.status == 401
+        finally:
+            await client.close()
+
+    # Verify secrets.example.env defines WEBHOOK_SECRET_TOKEN with the placeholder expected by create-lxc.sh
+    from pathlib import Path
+
+    secrets_tmpl = (Path(__file__).resolve().parent.parent / "secrets.example.env").read_text(encoding="utf-8")
+    assert 'WEBHOOK_SECRET_TOKEN="change-me-to-a-random-secret-string"' in secrets_tmpl

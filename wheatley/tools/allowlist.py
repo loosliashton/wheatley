@@ -221,6 +221,17 @@ FORBIDDEN_ARGUMENTS: Dict[str, Set[str]] = {
         "importdisk",
     },
     "pvesh": {"create", "set", "delete"},
+    "find": {
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-delete",
+        "-fprint",
+        "-fprint0",
+        "-fprintf",
+        "-fls",
+    },
 }
 
 DISALLOWED_PATTERN_BINARIES = {
@@ -275,7 +286,49 @@ DISALLOWED_PATTERN_BINARIES = {
     "apt",
     "apt-get",
     "dpkg",
+    "xargs",
 }
+
+
+def _validate_awk_stage(seg: List[str]) -> Optional[str]:
+    """Validate a piped awk stage against command execution, redirection, and file reads."""
+    joined_awk = " ".join(seg)
+    if re.search(r"\bsystem\s*\(", joined_awk) or re.search(r"\bgetline\b", joined_awk):
+        return "Forbidden function in awk command"
+    if ">" in joined_awk or "|" in joined_awk:
+        return "Forbidden redirection or pipe in awk command"
+
+    i = 1
+    saw_program = False
+    while i < len(seg):
+        tok = seg[i].strip("\"'")
+        if tok in ("-f", "--file", "-E", "--exec", "-i", "--include", "-l", "--load"):
+            return f"Forbidden awk option '{tok}'"
+        if tok.startswith(("--file=", "--exec=", "--include=", "--load=", "-f", "-l")):
+            return f"Forbidden awk option '{tok}'"
+        if tok in ("-F", "--field-separator", "-v", "--assign"):
+            if i + 1 >= len(seg):
+                return f"Missing argument for awk option '{tok}'"
+            i += 2
+            continue
+        if tok.startswith(("-F", "-v", "--field-separator=", "--assign=")):
+            i += 1
+            continue
+        if tok == "--":
+            i += 1
+            if i < len(seg):
+                if saw_program:
+                    return "Trailing file arguments are forbidden in piped awk command"
+                saw_program = True
+                i += 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            return f"Unsupported awk option '{tok}'"
+        if saw_program:
+            return "Trailing file arguments are forbidden in piped awk command"
+        saw_program = True
+        i += 1
+    return None
 
 
 def is_command_allowed(
@@ -346,9 +399,9 @@ def is_command_allowed(
                 f"Piping to '{filter_cmd}' is forbidden; only safe filters are permitted ({', '.join(sorted(ALLOWED_PIPELINE_FILTERS))})",
             )
         if filter_cmd == "awk":
-            joined_awk = " ".join(seg)
-            if "system(" in joined_awk or "getline" in joined_awk or ">" in joined_awk:
-                return False, "Forbidden function or redirection in awk command"
+            awk_err = _validate_awk_stage(seg)
+            if awk_err:
+                return False, awk_err
 
     # Primary command is segment 0
     primary_tokens = pipeline_segments[0]

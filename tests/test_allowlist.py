@@ -221,3 +221,55 @@ def test_is_self_guest_targeted():
     assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct exec 105 -- ping 10.0.0.110")
     assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct stop 1100")
     assert not is_self_guest_targeted("pve-node-01/110", "pve-node-01", "pct exec 105 -- sleep 110")
+
+
+def test_awk_pipeline_hardening():
+    allowed_awk = [
+        "uptime | awk -F: '{print $1}'",
+        "uptime | awk -F : -v tag=ok '{print tag, $1}'",
+        "df -h | awk '{print $1, $5}'",
+    ]
+    for cmd in allowed_awk:
+        ok, reason = is_command_allowed(cmd)
+        assert ok, f"Safe awk pipeline '{cmd}' should be allowed, got: {reason}"
+
+    blocked_awk = [
+        "docker ps | awk 'BEGIN{system (\"reboot\")}'",
+        "uptime | awk 'BEGIN{print \"id\" | \"sh\"}'",
+        "uptime | awk '{print}' /etc/shadow",
+        "uptime | awk -f /tmp/evil.awk",
+        "uptime | awk -l filefuncs '{print $1}'",
+        "uptime | awk --exec /tmp/evil.awk",
+    ]
+    for cmd in blocked_awk:
+        ok, _ = is_command_allowed(cmd)
+        assert not ok, f"Dangerous awk pipeline '{cmd}' should be rejected"
+
+
+def test_find_and_xargs_hardening():
+    from wheatley.tools.allowlist import validate_proposed_pattern
+
+    # xargs cannot be added as a persistent allowlist pattern
+    for pat in ("xargs echo *", "xargs -n 1"):
+        ok, _ = validate_proposed_pattern(pat)
+        assert not ok, f"Pattern '{pat}' should be rejected"
+
+    # find execution/mutation flags cannot be proposed in patterns
+    for pat in ("find /var/log -exec *", "find /var/log -delete"):
+        ok, _ = validate_proposed_pattern(pat)
+        assert not ok, f"Pattern '{pat}' should be rejected"
+
+    # Even if a read-only find prefix is custom-allowlisted, dangerous flags remain blocked
+    custom = ["find /var/log *"]
+    ok, reason = is_command_allowed("find /var/log -name *.log", custom_allowlist=custom)
+    assert ok, f"Read-only find should be allowed under custom rule, got: {reason}"
+
+    for bad_find in (
+        "find /var/log -exec rm {} +",
+        "find /var/log -execdir id +",
+        "find /var/log -ok rm {} +",
+        "find /var/log -delete",
+        "find /var/log -fprintf /tmp/out %p",
+    ):
+        ok, _ = is_command_allowed(bad_find, custom_allowlist=custom)
+        assert not ok, f"Dangerous find '{bad_find}' should be rejected"
